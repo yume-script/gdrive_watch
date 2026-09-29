@@ -652,9 +652,12 @@ class GDriveWatchProvider(BaseMetadataProvider):
             item = {"name": name, "type": conf.get("type", "")}
             if item["type"] == "drive":
                 try:
-                    item["expiry"] = json.loads(conf.get("token") or "{}").get("expiry", "")
+                    tok = json.loads(conf.get("token") or "{}")
                 except ValueError:
-                    item["expiry"] = ""
+                    tok = {}
+                item["expiry"] = tok.get("expiry", "")
+                item["scope_conf"] = conf.get("scope", "") or "drive (기본)"
+                item["granted"] = self._granted_scopes(tok)
                 item["custom_auth"] = any(k for k in conf if "endpoint" in k.lower())
                 item["team_drive"] = bool(conf.get("team_drive"))
             elif item["type"] == "union":
@@ -930,6 +933,24 @@ class GDriveWatchProvider(BaseMetadataProvider):
         return {"success": True, "expiry": after,
                 "message": f"{remote} 토큰을 갱신했습니다. 새 만료 {after[:19].replace('T', ' ')} (이전 {before[:19].replace('T', ' ')}). "
                            "다른 설정(scope 등)은 그대로입니다."}
+
+    @staticmethod
+    def _granted_scopes(token):
+        """토큰이 실제로 가진 권한을 Google tokeninfo로 확인 (rclone.conf의 scope 값과 다를 수 있음)."""
+        from urllib.error import HTTPError, URLError
+        from urllib.parse import quote
+        from urllib.request import urlopen
+        access = token.get("access_token")
+        if not access:
+            return "토큰 없음"
+        try:
+            with urlopen(f"https://oauth2.googleapis.com/tokeninfo?access_token={quote(access)}", timeout=5) as response:
+                scopes = (json.loads(response.read() or b"{}").get("scope") or "").split()
+            return ", ".join(sc.rsplit("/", 1)[-1] for sc in scopes) or "알 수 없음"
+        except HTTPError:
+            return "확인 불가 (토큰 만료 — 갱신 후 다시 확인)"
+        except (URLError, OSError, ValueError):
+            return "확인 불가 (네트워크)"
 
     def _rpc_preview(self, ctx):
         path = str(ctx.get("path") or "").strip()

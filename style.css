@@ -174,3 +174,5 @@
 @media (max-width: 900px) { .gdw-checkline { grid-template-columns: 1fr; gap: 0; } }
 
 .gdw-row.root.is-local { grid-template-columns: 1fr 7.5rem 9rem 6rem 3fr 0 auto auto auto; }
+
+.gdw-rclone .dim { color: var(--app-text-muted); }
