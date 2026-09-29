@@ -265,10 +265,16 @@
                 tbody.appendChild(el('tr', {}, [
                     el('td', { text: x.name }),
                     el('td', { class: expired ? 'bad' : '', text: x.expiry ? (expired ? '만료됨 ' : '') + String(x.expiry).slice(0, 19).replace('T', ' ') : '토큰 없음' }),
-                    el('td', { text: (x.team_drive ? '공유 드라이브' : '내 드라이브') + (x.custom_auth ? ' · 커스텀 인증' : '') })
+                    el('td', { text: (x.team_drive ? '공유 드라이브' : '내 드라이브') + (x.custom_auth ? ' · 커스텀 인증' : '') }),
+                    el('td', {}, [x.expiry ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet', text: '토큰 갱신',
+                        onclick: function (e) {
+                            var b = e.target; b.disabled = true; b.textContent = '갱신 중…';
+                            rpc('refresh_token', { remote: x.name }).then(function (d) { toast(d.message); checkRclone(true); })
+                                .catch(function (err) { toast(err.message, true); b.disabled = false; b.textContent = '토큰 갱신'; });
+                        } }) : null])
                 ]));
             });
-            out.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, [el('th', { text: 'Drive 리모트' }), el('th', { text: '토큰 만료' }), el('th', { text: '비고' })])]), tbody]));
+            out.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, [el('th', { text: 'Drive 리모트' }), el('th', { text: '토큰 만료' }), el('th', { text: '비고' }), el('th', { text: '' })])]), tbody]));
             if (!drives.length) out.appendChild(el('p', { text: '이 설정 파일에 Drive 리모트가 없습니다. rclone.conf 경로를 확인하세요.' }));
             out.hidden = false;
         }).catch(function (e) {

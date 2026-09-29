@@ -310,6 +310,13 @@ class Rclone:
         expiry = parse_time(token.get("expiry")) or utcnow() + timedelta(minutes=30)
         if not token.get("access_token") or expiry <= utcnow():
             where = self.config or "rclone 기본 설정 파일"
+            custom = [k for k in conf if "endpoint" in k.lower()]
+            if custom:
+                raise RuntimeError(
+                    f"{remote} 토큰이 만료된 상태입니다(만료 {token.get('expiry') or '알 수 없음'}, 설정 파일: {where}). "
+                    f"이 리모트는 커스텀 인증({', '.join(custom)})이라 지금 rclone({self.binary})으로는 갱신되지 않습니다. "
+                    "이 방식을 지원하는 rclone을 지정하거나, 토큰을 계속 갱신해 주는 쪽의 rclone.conf를 지정하거나, "
+                    "같은 폴더에 접근되는 다른 리모트로 감시하세요.")
             raise RuntimeError(f"{remote} 토큰이 만료된 상태입니다(만료 {token.get('expiry') or '알 수 없음'}, 설정 파일: {where}). "
                                "rclone이 이 리모트의 토큰을 갱신하지 못했습니다. rclone.conf 경로와 리모트의 인증 방식을 확인하세요.")
         self._tokens[remote] = {"access": token["access_token"], "expiry": expiry,

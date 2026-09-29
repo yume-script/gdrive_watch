@@ -835,6 +835,49 @@ class GDriveWatchProvider(BaseMetadataProvider):
         ok, msg = _verify_token(settings["bookoasis_url"], token)
         return {"success": True, "ok": ok, "message": f"{msg} · 사용 중인 토큰: {source}"}
 
+    def _rpc_refresh_token(self, ctx):
+        """rclone.conf의 리모트 토큰을 지금 갱신한다.
+        토큰 만료 시각만 과거로 바꿔 둔 뒤 rclone을 한 번 실행하면, rclone이 자기 방식으로 토큰을 새로 받아
+        rclone.conf에 저장한다. (커스텀 인증 리모트도 이 rclone 바이너리가 지원하면 그대로 동작)"""
+        remote = str(ctx.get("remote") or "").strip().rstrip(":")
+        if not remote:
+            return {"success": False, "error": "리모트를 지정하세요."}
+        base = self._rclone_cmd()
+
+        def run(*args, timeout=60):
+            return subprocess.run(base + list(args), capture_output=True, text=True, timeout=timeout)
+
+        def current():
+            dump = run("config", "dump")
+            if dump.returncode != 0:
+                raise RuntimeError(dump.stderr.strip()[-300:] or "rclone config dump 실패")
+            conf = (json.loads(dump.stdout or "{}") or {}).get(remote)
+            if not conf:
+                raise RuntimeError(f"rclone.conf에 [{remote}] 리모트가 없습니다.")
+            return conf, json.loads(conf.get("token") or "{}")
+
+        try:
+            conf, token = current()
+            if conf.get("type") != "drive" or not token.get("refresh_token"):
+                return {"success": False, "error": f"{remote}는 갱신할 수 있는 Drive OAuth 토큰이 없습니다."}
+            before = token.get("expiry", "")
+            token["expiry"] = "2000-01-01T00:00:00Z"
+            args = ["config", "update", remote, "token", json.dumps(token), "config_refresh_token", "false"]
+            result = run(*args, "--non-interactive")
+            if result.returncode != 0 and "non-interactive" in result.stderr:
+                result = run(*args)
+            if result.returncode != 0:
+                return {"success": False, "error": result.stderr.strip()[-300:] or "rclone config update 실패"}
+            about = run("about", f"{remote}:", "--json", timeout=90)
+            _, token = current()
+            after = token.get("expiry", "")
+            if about.returncode != 0 or after.startswith("2000-"):
+                return {"success": False, "error": f"rclone이 토큰을 새로 받지 못했습니다: {about.stderr.strip()[-300:]}"}
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+        return {"success": True, "message": f"{remote} 토큰을 갱신했습니다. 새 만료 시각 {after[:19].replace('T', ' ')} (이전 {before[:19].replace('T', ' ')})",
+                "expiry": after}
+
     def _rpc_preview(self, ctx):
         path = str(ctx.get("path") or "").strip()
         runtime = self._sync_runtime()
