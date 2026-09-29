@@ -837,46 +837,99 @@ class GDriveWatchProvider(BaseMetadataProvider):
 
     def _rpc_refresh_token(self, ctx):
         """rclone.conf의 리모트 토큰을 지금 갱신한다.
-        토큰 만료 시각만 과거로 바꿔 둔 뒤 rclone을 한 번 실행하면, rclone이 자기 방식으로 토큰을 새로 받아
-        rclone.conf에 저장한다. (커스텀 인증 리모트도 이 rclone 바이너리가 지원하면 그대로 동작)"""
+
+        실제 rclone.conf는 건드리지 않고 임시 복사본에서만 토큰 만료 시각을 과거로 바꿔 rclone을 실행한다.
+        rclone이 새 토큰을 받아 오면 실제 파일에서는 그 리모트의 'token =' 한 줄만 교체한다.
+        (rclone config update는 백엔드 설정 과정을 다시 거치면서 scope·team_drive 같은 값을 바꿀 수 있어 쓰지 않음)
+        갱신에 실패하면 실제 파일은 그대로다."""
+        import re
+        import shutil
+        import tempfile
         remote = str(ctx.get("remote") or "").strip().rstrip(":")
         if not remote:
             return {"success": False, "error": "리모트를 지정하세요."}
-        base = self._rclone_cmd()
+        settings = self._settings()
+        conf_path = settings["rclone_config"]
+        if not conf_path:
+            out = subprocess.run([settings["rclone_path"], "config", "file"], capture_output=True, text=True, timeout=15).stdout
+            lines = [l.strip() for l in out.splitlines() if l.strip()]
+            conf_path = lines[-1] if lines else ""
+        if not conf_path or not os.path.isfile(conf_path):
+            return {"success": False, "error": f"rclone.conf를 찾을 수 없습니다: {conf_path or '(알 수 없음)'}"}
 
-        def run(*args, timeout=60):
-            return subprocess.run(base + list(args), capture_output=True, text=True, timeout=timeout)
+        section_re = re.compile(r"^\[(.+?)\]\s*$")
+        token_re = re.compile(r"^(\s*token\s*=\s*)(.*?)\s*$")
 
-        def current():
-            dump = run("config", "dump")
-            if dump.returncode != 0:
-                raise RuntimeError(dump.stderr.strip()[-300:] or "rclone config dump 실패")
-            conf = (json.loads(dump.stdout or "{}") or {}).get(remote)
-            if not conf:
-                raise RuntimeError(f"rclone.conf에 [{remote}] 리모트가 없습니다.")
-            return conf, json.loads(conf.get("token") or "{}")
+        def find_token(text):
+            """(줄 목록, token 줄 번호, 앞부분, 값) — 해당 리모트 섹션 안에서만 찾는다."""
+            lines = text.splitlines(keepends=True)
+            inside = False
+            for index, line in enumerate(lines):
+                head = section_re.match(line.strip())
+                if head:
+                    inside = head.group(1) == remote
+                    continue
+                if inside:
+                    m = token_re.match(line.rstrip("\r\n"))
+                    if m:
+                        return lines, index, m.group(1), m.group(2)
+            return lines, -1, "", ""
 
+        def eol(line):
+            return "\r\n" if line.endswith("\r\n") else "\n"
+
+        with open(conf_path, encoding="utf-8") as handle:
+            original = handle.read()
+        lines, index, prefix, value = find_token(original)
+        if index < 0:
+            return {"success": False, "error": f"rclone.conf의 [{remote}] 섹션에 token이 없습니다."}
         try:
-            conf, token = current()
-            if conf.get("type") != "drive" or not token.get("refresh_token"):
-                return {"success": False, "error": f"{remote}는 갱신할 수 있는 Drive OAuth 토큰이 없습니다."}
-            before = token.get("expiry", "")
-            token["expiry"] = "2000-01-01T00:00:00Z"
-            args = ["config", "update", remote, "token", json.dumps(token), "config_refresh_token", "false"]
-            result = run(*args, "--non-interactive")
-            if result.returncode != 0 and "non-interactive" in result.stderr:
-                result = run(*args)
-            if result.returncode != 0:
-                return {"success": False, "error": result.stderr.strip()[-300:] or "rclone config update 실패"}
-            about = run("about", f"{remote}:", "--json", timeout=90)
-            _, token = current()
-            after = token.get("expiry", "")
-            if about.returncode != 0 or after.startswith("2000-"):
-                return {"success": False, "error": f"rclone이 토큰을 새로 받지 못했습니다: {about.stderr.strip()[-300:]}"}
-        except Exception as error:
-            return {"success": False, "error": str(error)}
-        return {"success": True, "message": f"{remote} 토큰을 갱신했습니다. 새 만료 시각 {after[:19].replace('T', ' ')} (이전 {before[:19].replace('T', ' ')})",
-                "expiry": after}
+            token = json.loads(value)
+        except ValueError:
+            return {"success": False, "error": f"[{remote}]의 token 값을 읽을 수 없습니다."}
+        if not token.get("refresh_token"):
+            return {"success": False, "error": f"[{remote}]에는 refresh_token이 없어 갱신할 수 없습니다."}
+        custom = [k for k in re.findall(r"^\s*([\w-]*endpoint[\w-]*)\s*=", original, re.M | re.I)]
+        before = token.get("expiry", "")
+
+        workdir = tempfile.mkdtemp(prefix="gdw-token-")
+        try:
+            expired = dict(token, expiry="2000-01-01T00:00:00Z")
+            temp_lines = list(lines)
+            temp_lines[index] = prefix + json.dumps(expired, separators=(",", ":")) + eol(lines[index])
+            temp_conf = os.path.join(workdir, "rclone.conf")
+            with open(temp_conf, "w", encoding="utf-8") as handle:
+                handle.write("".join(temp_lines))
+            about = subprocess.run([settings["rclone_path"], "--config", temp_conf, "about", f"{remote}:", "--json"],
+                                   capture_output=True, text=True, timeout=90)
+            with open(temp_conf, encoding="utf-8") as handle:
+                _, t_index, _, t_value = find_token(handle.read())
+            try:
+                fresh = json.loads(t_value) if t_index >= 0 else {}
+            except ValueError:
+                fresh = {}
+            after = fresh.get("expiry", "")
+            if about.returncode != 0 or not after or after.startswith("2000-"):
+                reason = about.stderr.strip()[-300:] or "rclone이 새 토큰을 저장하지 않았습니다."
+                hint = (f" 이 리모트는 커스텀 인증({', '.join(custom)})이라 지금 rclone으로는 갱신할 수 없습니다."
+                        if custom else "")
+                return {"success": False, "error": f"갱신 실패 (rclone.conf는 바꾸지 않았습니다).{hint} {reason}"}
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        # 실제 파일: 그 사이 바뀌었을 수 있으니 다시 읽고, 해당 리모트의 token 한 줄만 교체해 제자리에 쓴다
+        with open(conf_path, encoding="utf-8") as handle:
+            latest = handle.read()
+        lines, index, prefix, _ = find_token(latest)
+        if index < 0:
+            return {"success": False, "error": "갱신 중 rclone.conf가 바뀌어 반영하지 못했습니다. 다시 시도하세요."}
+        lines[index] = prefix + t_value + eol(lines[index])
+        with open(conf_path, "r+", encoding="utf-8") as handle:  # 제자리 쓰기: 파일 단위 마운트에서도 동작
+            handle.write("".join(lines))
+            handle.truncate()
+        return {"success": True, "expiry": after,
+                "message": f"{remote} 토큰을 갱신했습니다. 새 만료 {after[:19].replace('T', ' ')} (이전 {before[:19].replace('T', ' ')}). "
+                           "다른 설정(scope 등)은 그대로입니다."}
 
     def _rpc_preview(self, ctx):
         path = str(ctx.get("path") or "").strip()
