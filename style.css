@@ -1,0 +1,176 @@
+.gdw {
+    --gdw-ok: #2f9e6e;
+    --gdw-fail: #d9534f;
+    --gdw-wait: #d9a13b;
+    --gdw-skip: var(--app-text-muted);
+    color: var(--app-text-primary);
+    padding: 1.25rem clamp(0.75rem, 2vw, 2rem) 3rem;
+    max-width: 1200px;
+    font-size: 0.92rem;
+    line-height: 1.5;
+}
+.gdw [hidden] { display: none !important; }
+.gdw code { font-size: 0.85em; padding: 0 0.3em; border-radius: 4px; background: var(--app-input-bg); }
+
+/* 상단 */
+.gdw-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.gdw-state { display: flex; align-items: center; gap: 0.85rem; }
+.gdw-title { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; }
+.gdw-sub { margin: 0.1rem 0 0; color: var(--app-text-muted); font-size: 0.85rem; }
+.gdw-pulse { width: 12px; height: 12px; border-radius: 50%; background: var(--gdw-skip); flex: none; }
+.gdw-pulse.is-on { background: var(--gdw-ok); box-shadow: 0 0 0 0 rgba(47, 158, 110, 0.55); animation: gdw-pulse 2.4s ease-out infinite; }
+.gdw-pulse.is-busy { background: var(--app-accent); }
+@keyframes gdw-pulse { 70% { box-shadow: 0 0 0 9px rgba(47, 158, 110, 0); } 100% { box-shadow: 0 0 0 0 rgba(47, 158, 110, 0); } }
+@media (prefers-reduced-motion: reduce) { .gdw-pulse.is-on { animation: none; } }
+.gdw-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+.gdw-btn {
+    background: var(--app-accent); color: #fff; border: 1px solid transparent; border-radius: 6px;
+    padding: 0.42rem 0.9rem; font: inherit; font-weight: 600; cursor: pointer;
+}
+.gdw-btn:hover { background: var(--app-accent-hover); }
+.gdw-btn:focus-visible, .gdw button:focus-visible, .gdw input:focus-visible, .gdw select:focus-visible { outline: 2px solid var(--app-accent); outline-offset: 2px; }
+.gdw-btn-quiet { background: transparent; color: var(--app-text-primary); border-color: var(--app-border); font-weight: 500; }
+.gdw-btn-quiet:hover { background: var(--app-bg-card-hover); }
+.gdw-btn:disabled { opacity: 0.5; cursor: default; }
+
+.gdw-warn { list-style: none; margin: 0 0 1rem; padding: 0.6rem 0.9rem; border-left: 3px solid var(--gdw-wait); background: var(--app-bg-card); border-radius: 0 6px 6px 0; }
+.gdw-warn li { color: var(--app-text-secondary); font-size: 0.87rem; }
+
+/* 처리 흐름: 대기 → 반영/밖/실패 를 한 줄 막대로 */
+.gdw-flow { display: flex; flex-wrap: wrap; align-items: stretch; border: 1px solid var(--app-border); border-radius: 8px; overflow: hidden; background: var(--app-bg-card); margin-bottom: 1rem; }
+.gdw-flow-seg {
+    flex: 1 1 110px; display: flex; align-items: baseline; gap: 0.45rem; padding: 0.8rem 1rem;
+    background: none; border: 0; border-right: 1px solid var(--app-border-light); color: inherit; font: inherit; cursor: pointer; text-align: left;
+    border-top: 3px solid var(--gdw-wait);
+}
+.gdw-flow-seg.is-done { border-top-color: var(--gdw-ok); }
+.gdw-flow-seg.is-skip { border-top-color: var(--app-border); }
+.gdw-flow-seg.is-fail { border-top-color: var(--gdw-fail); }
+.gdw-flow-seg:hover, .gdw-flow-seg.is-active { background: var(--app-bg-card-hover); }
+.gdw-flow-seg b { font-size: 1.5rem; font-variant-numeric: tabular-nums; line-height: 1; }
+.gdw-flow-seg span { color: var(--app-text-muted); font-size: 0.82rem; }
+.gdw-flow-seg small { color: var(--app-text-muted); }
+.gdw-flow-meta { flex: 1 1 100%; margin: 0; padding: 0.45rem 1rem; border-top: 1px solid var(--app-border-light); color: var(--app-text-muted); font-size: 0.8rem; }
+
+/* 감시 폴더 표 */
+.gdw-roots { overflow-x: auto; margin-bottom: 1.25rem; }
+.gdw table { width: 100%; border-collapse: collapse; }
+.gdw th { text-align: left; font-weight: 600; color: var(--app-text-muted); font-size: 0.8rem; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--app-border); }
+.gdw td { padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--app-border-light); vertical-align: top; }
+.gdw td small { display: block; color: var(--app-text-muted); word-break: break-all; }
+.gdw-empty { color: var(--app-text-muted); text-align: center; padding: 1.2rem; }
+.gdw-tag { display: inline-block; font-size: 0.78rem; padding: 0.05rem 0.45rem; border-radius: 4px; border: 1px solid var(--app-border); color: var(--app-text-secondary); white-space: nowrap; }
+.gdw-tag.ok { border-color: var(--gdw-ok); color: var(--gdw-ok); }
+.gdw-tag.fail { border-color: var(--gdw-fail); color: var(--gdw-fail); }
+.gdw-tag.wait { border-color: var(--gdw-wait); color: var(--gdw-wait); }
+.gdw-err { color: var(--gdw-fail); font-size: 0.8rem; }
+
+/* 탭 */
+.gdw-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--app-border); margin-bottom: 1rem; }
+.gdw-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 0.55rem 0.9rem; color: var(--app-text-muted); font: inherit; cursor: pointer; margin-bottom: -1px; }
+.gdw-tabs button.is-on { color: var(--app-text-primary); border-bottom-color: var(--app-accent); font-weight: 600; }
+
+.gdw-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
+.gdw-grow { flex: 1; }
+.gdw input, .gdw select {
+    background: var(--app-input-bg); color: var(--app-text-primary); border: 1px solid var(--app-border);
+    border-radius: 6px; padding: 0.4rem 0.55rem; font: inherit; min-width: 0;
+}
+.gdw-toolbar input[type=search] { flex: 1 1 220px; max-width: 360px; }
+
+/* 변경 기록 */
+.gdw-events { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--app-border-light); }
+.gdw-ev { border-bottom: 1px solid var(--app-border-light); }
+.gdw-ev-row { display: grid; grid-template-columns: 22px 7rem 3.5rem minmax(0, 1fr) auto; gap: 0.6rem; align-items: center; padding: 0.55rem 0.3rem; cursor: pointer; }
+.gdw-ev-row:hover { background: var(--app-bg-card-hover); }
+.gdw-ev-time { color: var(--app-text-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.gdw-ev-path { min-width: 0; }
+.gdw-ev-path div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gdw-ev-path .from { color: var(--app-text-muted); font-size: 0.8rem; text-decoration: line-through; }
+.gdw-ev-path .root { color: var(--app-text-muted); font-size: 0.78rem; }
+
+/* 파이프라인: 감지 ─ VFS ─ 스캔 */
+.gdw-pipe { display: flex; align-items: center; gap: 0; white-space: nowrap; }
+.gdw-pipe i { width: 9px; height: 9px; border-radius: 50%; background: var(--app-border); display: inline-block; }
+.gdw-pipe i + i { margin-left: 16px; position: relative; }
+.gdw-pipe i + i::before { content: ""; position: absolute; right: 9px; top: 4px; width: 16px; height: 1px; background: var(--app-border); }
+.gdw-pipe i.ok { background: var(--gdw-ok); }
+.gdw-pipe i.fail { background: var(--gdw-fail); }
+.gdw-pipe i.wait { background: var(--gdw-wait); }
+.gdw-pipe i.none { background: transparent; border: 1px solid var(--app-border); width: 7px; height: 7px; }
+.gdw-pipe em { font-style: normal; margin-left: 0.6rem; font-size: 0.8rem; color: var(--app-text-secondary); min-width: 4.5rem; }
+
+.gdw-ev-detail { padding: 0.2rem 0.6rem 0.9rem 2.2rem; font-size: 0.84rem; }
+.gdw-ev-detail h4 { margin: 0.6rem 0 0.25rem; font-size: 0.8rem; color: var(--app-text-muted); font-weight: 600; }
+.gdw-ev-detail ul { margin: 0; padding: 0; list-style: none; }
+.gdw-ev-detail li { padding: 0.15rem 0; word-break: break-all; }
+.gdw-ev-detail li::before { content: "●"; margin-right: 0.4rem; font-size: 0.7em; color: var(--app-border); }
+.gdw-ev-detail li.ok::before { color: var(--gdw-ok); }
+.gdw-ev-detail li.fail::before { color: var(--gdw-fail); }
+.gdw-ev-detail .msg { color: var(--gdw-fail); }
+
+.gdw-pager { display: flex; justify-content: center; align-items: center; gap: 0.75rem; margin-top: 0.9rem; color: var(--app-text-muted); }
+
+/* 설정 */
+.gdw-pane h3 { margin: 1.6rem 0 0.2rem; font-size: 1rem; }
+.gdw-pane h3:first-of-type { margin-top: 0.4rem; }
+.gdw-help, .gdw-note { margin: 0 0 0.6rem; color: var(--app-text-muted); font-size: 0.84rem; max-width: 72ch; }
+.gdw-rows { display: grid; gap: 0.5rem; margin-bottom: 0.5rem; }
+.gdw-row { display: grid; gap: 0.45rem; align-items: end; padding: 0.6rem; border: 1px solid var(--app-border-light); border-radius: 6px; background: var(--app-bg-card); }
+.gdw-row.root { grid-template-columns: 1fr 8.5rem 1.2fr 1.6fr 2fr auto auto auto auto; }
+.gdw-row.vfs { grid-template-columns: 2fr 2fr 1.4fr 1fr auto; }
+.gdw-row label, .gdw-opts label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.76rem; color: var(--app-text-muted); }
+.gdw-row .check { flex-direction: row; align-items: center; gap: 0.3rem; padding-bottom: 0.45rem; white-space: nowrap; }
+.gdw-row .del { background: none; border: 0; color: var(--app-text-muted); cursor: pointer; font-size: 1.1rem; padding: 0.3rem 0.4rem; }
+.gdw-row .del:hover { color: var(--gdw-fail); }
+.gdw-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.6rem; max-width: 760px; }
+.gdw-opts .gdw-wide { grid-column: 1 / -1; }
+.gdw-libs { margin: 0.8rem 0; font-size: 0.84rem; }
+.gdw-libs summary { cursor: pointer; color: var(--app-text-secondary); }
+.gdw-libs ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+.gdw-libs li { margin: 0.2rem 0; word-break: break-all; }
+.gdw-libs button { margin-left: 0.4rem; font-size: 0.75rem; padding: 0.1rem 0.45rem; }
+.gdw-save { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.2rem; color: var(--app-text-muted); }
+.gdw-preview { display: flex; gap: 0.5rem; max-width: 760px; }
+.gdw-preview input { flex: 1; }
+.gdw-pre { background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 6px; padding: 0.75rem; overflow-x: auto; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; margin: 0.6rem 0 0; }
+.gdw-log { max-height: 60vh; overflow: auto; white-space: pre; }
+
+.gdw-toast { position: fixed; right: 1.5rem; bottom: 1.5rem; background: var(--app-bg-card); border: 1px solid var(--app-border); border-left: 3px solid var(--app-accent); border-radius: 6px; padding: 0.7rem 1rem; box-shadow: var(--app-shadow, 0 6px 18px rgba(0, 0, 0, 0.2)); z-index: 50; max-width: 420px; }
+.gdw-toast.is-error { border-left-color: var(--gdw-fail); }
+
+@media (max-width: 900px) {
+    .gdw-row.root, .gdw-row.vfs { grid-template-columns: 1fr 1fr; }
+    .gdw-ev-row { grid-template-columns: 22px minmax(0, 1fr) auto; }
+    .gdw-ev-time, .gdw-ev-row > .gdw-tag { display: none; }
+    .gdw-roots th:nth-child(4), .gdw-roots td:nth-child(4) { display: none; }
+}
+.gdw-ev-row > .gdw-tag { justify-self: start; }
+
+.gdw-env { max-width: 760px; }
+.gdw-check { flex-direction: row !important; align-items: center; gap: 0.45rem !important; grid-column: 1 / -1; font-size: 0.85rem !important; color: var(--app-text-primary) !important; }
+.gdw-rclone { margin-top: 0.8rem; max-width: 900px; font-size: 0.84rem; }
+.gdw-rclone p { margin: 0 0 0.4rem; color: var(--app-text-muted); word-break: break-all; }
+.gdw-rclone td { padding: 0.35rem 0.6rem; }
+.gdw-rclone .bad { color: var(--gdw-fail); }
+
+.gdw-vfsmap { max-height: 420px; overflow: auto; border: 1px solid var(--app-border-light); border-radius: 6px; }
+.gdw-vfsmap td { font-size: 0.82rem; word-break: break-all; }
+.gdw-vfsmap td.pending { color: var(--app-text-muted); }
+.gdw-vfsmap td.none { color: var(--app-text-muted); font-style: italic; }
+.gdw-vfsmap button { font-size: 0.75rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
+
+.gdw-check-btn { padding: 0.3rem 0.7rem; margin-bottom: 0.1rem; }
+.gdw-checks { grid-column: 1 / -1; display: grid; gap: 0.25rem; padding: 0.5rem 0.2rem 0.1rem; border-top: 1px dashed var(--app-border-light); font-size: 0.84rem; }
+.gdw-checkline { display: grid; grid-template-columns: 8.5rem 1fr; gap: 0.6rem; }
+.gdw-checkline b { font-weight: 600; }
+.gdw-checkline b::before { content: "●"; margin-right: 0.4rem; font-size: 0.75em; color: var(--app-border); }
+.gdw-checkline.ok b::before { color: var(--gdw-ok); }
+.gdw-checkline.fail b::before { color: var(--gdw-fail); }
+.gdw-checkline.warn b::before { color: var(--gdw-wait); }
+.gdw-checkline.fail span { color: var(--gdw-fail); }
+.gdw-muted { color: var(--app-text-muted); }
+@media (max-width: 900px) { .gdw-checkline { grid-template-columns: 1fr; gap: 0; } }
+
+.gdw-row.root.is-local { grid-template-columns: 1fr 7.5rem 9rem 6rem 3fr 0 auto auto auto; }
