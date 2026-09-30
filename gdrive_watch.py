@@ -201,6 +201,7 @@ DEFAULT_WATCH = {
     "extensions": "",
     "verbose_log": False,
     "file_wait_minutes": 10,
+    "full_scan_guard_minutes": 30,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -281,10 +282,16 @@ class GDriveWatchProvider(BaseMetadataProvider):
         for db_type in DB_TYPES:
             try:
                 gateway = self.get_db_gateway(db_type)
-                try:
-                    rows = gateway.fetch_all("SELECT id, name, physical_path, rclone_rc_url FROM libraries") or []
-                except Exception:
-                    rows = gateway.fetch_all("SELECT id, name, physical_path FROM libraries") or []
+                rows = None
+                for columns in ("id, name, physical_path, rclone_rc_url, cron_schedule",
+                                "id, name, physical_path, rclone_rc_url", "id, name, physical_path"):
+                    try:
+                        rows = gateway.fetch_all(f"SELECT {columns} FROM libraries") or []
+                        break
+                    except Exception:
+                        continue
+                if rows is None:
+                    continue
             except Exception:
                 continue
             for row in rows:
@@ -292,7 +299,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 roots = [line.strip() for line in str(row.get("physical_path") or "").splitlines() if line.strip()]
                 if roots:
                     items.append({"db_type": db_type, "id": int(row["id"]), "name": row.get("name") or "",
-                                  "roots": roots, "rclone_rc_url": row.get("rclone_rc_url") or ""})
+                                  "roots": roots, "rclone_rc_url": row.get("rclone_rc_url") or "",
+                                  "cron_schedule": row.get("cron_schedule") or ""})
         _write_json("libraries.json", {"ts": time.time(), "items": items})
         return items
 
@@ -682,6 +690,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "extensions": str(watch.get("extensions") or "").strip(),
             "verbose_log": bool(watch.get("verbose_log")),
             "file_wait_minutes": max(0, int(watch.get("file_wait_minutes", 10) or 0)),
+            "full_scan_guard_minutes": max(0, int(watch.get("full_scan_guard_minutes", 30) or 0)),
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),
@@ -1085,6 +1094,73 @@ class GDriveWatchProvider(BaseMetadataProvider):
         if status in (200, 204):
             return {"success": True, "message": "디스코드로 시험 알림을 보냈습니다."}
         return {"success": False, "error": f"전송 실패 (HTTP {status})" if status else "전송 실패 (연결 오류)"}
+
+    # ── 스캔 일정 (구 scan_scheduler) ──
+    SCHEDULE_SCOPES = (("general", "일반 (general)"), ("adult", "성인 (adult)"),
+                       ("audiobook", "오디오북 (audiobook)"), ("video", "비디오 (video)"))
+
+    @staticmethod
+    def _runs_often(cron):
+        """하루 2번 이상 도는 일정인지 (분·시 필드에 여러 값/범위/간격이 있으면)."""
+        fields = str(cron or "").split()
+        return len(fields) >= 5 and any(ch in fields[0] + fields[1] for ch in ",-/*")
+
+    def _rpc_schedules(self, ctx):
+        worker = _load_worker_module()
+        roots = [r for r in self._watch().get("roots") or [] if r.get("enabled", True)]
+        items, errors = [], []
+        for scope, label in self.SCHEDULE_SCOPES:
+            try:
+                gateway = self.get_db_gateway(scope)
+                rows = None
+                for columns in ("id, name, physical_path, cron_schedule, last_scanned_at, scan_status, is_remote, "
+                                "vfs_refresh_before_scan, rclone_rc_url", "id, name, physical_path, cron_schedule"):
+                    try:
+                        rows = gateway.fetch_all(f"SELECT {columns} FROM libraries ORDER BY name") or []
+                        break
+                    except Exception as error:
+                        last = error
+                if rows is None:
+                    raise last
+            except Exception as error:
+                errors.append(f"{scope}: {error}")
+                continue
+            for row in rows:
+                row = dict(row)
+                paths = [worker.norm(p.strip()).rstrip("/") for p in str(row.get("physical_path") or "").splitlines() if p.strip()]
+                watch_roots = sorted({r["name"] for r in roots for p in paths if p and r.get("local_root") and
+                                      (worker.under(p, r["local_root"].rstrip("/")) or worker.under(r["local_root"].rstrip("/"), p))})
+                cron = row.get("cron_schedule") or ""
+                items.append({
+                    "scope": scope, "scope_label": label, "id": row.get("id"), "name": row.get("name") or "(이름 없음)",
+                    "cron_schedule": cron, "last_scanned_at": row.get("last_scanned_at"),
+                    "scan_status": row.get("scan_status") or "", "is_remote": bool(row.get("is_remote")),
+                    "vfs_refresh_before_scan": bool(row.get("vfs_refresh_before_scan")),
+                    "rclone_rc_url": row.get("rclone_rc_url") or "",
+                    "watched": bool(watch_roots), "watch_roots": watch_roots,
+                    "frequent": bool(watch_roots) and self._runs_often(cron),
+                })
+        if errors and not items:
+            return {"success": False, "error": "; ".join(errors)}
+        return {"success": True, "items": items, "errors": errors}
+
+    def _rpc_update_cron(self, ctx):
+        scope = str(ctx.get("scope") or "").strip()
+        if scope not in {s for s, _ in self.SCHEDULE_SCOPES}:
+            return {"success": False, "error": f"유효하지 않은 세션입니다: {scope}"}
+        try:
+            library_id = int(ctx.get("id"))
+        except (TypeError, ValueError):
+            return {"success": False, "error": "유효하지 않은 보관함 ID입니다."}
+        cron = str(ctx.get("cron_schedule") or "").strip()
+        if len(cron.split()) < 5:
+            return {"success": False, "error": f"유효하지 않은 cron 표현식입니다: {cron}"}
+        try:
+            self.get_db_gateway(scope).execute("UPDATE libraries SET cron_schedule = %s WHERE id = %s", (cron, library_id))
+        except Exception as error:
+            return {"success": False, "error": f"저장 중 오류가 발생했습니다: {error}"}
+        self._sync_runtime(force_libraries=True)  # 워커의 전체 스캔 회피 시간대에도 바로 반영
+        return {"success": True, "message": f"스케줄이 저장되었습니다 ({cron})"}
 
     def _rpc_preview(self, ctx):
         path = str(ctx.get("path") or "").strip()

@@ -53,6 +53,7 @@
   <nav class="gdw-tabs" role="tablist">
     <button type="button" role="tab" class="gdw-chip is-on" data-tab="events">변경 기록</button>
     <button type="button" role="tab" class="gdw-chip" data-tab="setup">감시 설정</button>
+    <button type="button" role="tab" class="gdw-chip" data-tab="schedule">스캔 일정</button>
     <button type="button" role="tab" class="gdw-chip" data-tab="log">로그</button>
   </nav>
 
@@ -77,8 +78,8 @@
     <div class="gdw-toolbar">
       <select data-bind="f-status" aria-label="상태">
         <option value="">전체 상태</option>
-        <option value="pending">대기 (파일 대기 포함)</option>
-        <option value="waiting">파일 대기</option>
+        <option value="pending">대기 (잠시 대기 포함)</option>
+        <option value="waiting">잠시 대기 (파일 확인·전체 스캔 회피)</option>
         <option value="done">반영됨</option>
         <option value="skipped">보관함 밖</option>
         <option value="failed">실패 (시간 초과 포함)</option>
@@ -181,6 +182,7 @@
         <label>최대 재시도<input type="number" min="1" data-opt="max_attempts"></label>
         <label>기록 보관(일)<input type="number" min="1" data-opt="keep_days"></label>
         <label title="VFS 새로고침 뒤 마운트에 파일이 실제로 보일 때까지 기다리는 최대 시간. 0이면 확인하지 않음">파일 확인 대기(분)<input type="number" min="0" data-opt="file_wait_minutes"></label>
+        <label title="보관함 전체 스캔(cron)이 시작된 뒤 이 시간 동안은 그 보관함의 부분 스캔을 미룹니다. 0이면 끔">전체 스캔 회피(분)<input type="number" min="0" data-opt="full_scan_guard_minutes"></label>
         <label class="gdw-check"><input type="checkbox" data-opt="verbose_log"> 자세한 로그 (변경 하나하나를 어떻게 처리했는지 로그에 남김)</label>
         <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>
       </div>
@@ -224,6 +226,178 @@
         <button type="button" class="gdw-btn" data-act="preview">확인</button>
       </div>
       <pre class="gdw-pre" data-bind="preview-out" hidden></pre>
+    </div>
+  </section>
+
+  <!-- 스캔 일정 (구 scan_scheduler) -->
+  <section class="gdw-pane" data-pane="schedule" hidden>
+    <div class="gdw-panel gdw-panel-tight">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M0 2a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2zm15 2h-4v3h4V4zm0 4h-4v3h4V8zm0 4h-4v3h3a1 1 0 0 0 1-1v-2zm-5 3v-3H6v3h4zm-5 0v-3H1v2a1 1 0 0 0 1 1h3zm-4-4h4V8H1v3zm0-4h4V4H1v3zm5-3v3h4V4H6zm4 4H6v3h4V8z"/></svg></span>
+          <h2>보관함 전체 스캔 일정</h2>
+        </div>
+        <span class="gdw-badge">CRON</span>
+      </div>
+      <p class="gdw-tip gdw-tip-top">보관함별 전체 스캔(cron) 일정을 타임테이블로 보고, 겹치는 시간대를 찾아 조정합니다. <i class="fa-solid fa-bolt rm-live-icon"></i> 표시는 이 플러그인이 실시간으로 반영 중인 보관함으로, 전체 스캔은 누락 보정용이라 하루 1회 정도면 충분합니다.</p>
+      <div class="gdw-tally gdw-tally-inline">
+        <div class="gdw-flow-seg gdw-static"><span>전체 보관함</span><strong id="rm-stat-total">0</strong></div>
+        <div class="gdw-flow-seg gdw-static is-fail"><span>겹치는 시간대</span><strong id="rm-stat-overlap">0</strong></div>
+        <div class="gdw-flow-seg gdw-static is-done"><span>실시간 반영 중</span><strong id="rm-stat-live">0</strong></div>
+      </div>
+    </div>
+    <div class="rm-root">
+  <div class="rm-toolbar">
+    <div class="rm-toolbar-left">
+      <div class="rm-view-toggle" role="group">
+        <button id="rm-view-grid-btn" type="button" class="rm-view-btn active">
+          <i class="fa-solid fa-border-all"></i> 요일×시간
+        </button>
+        <button id="rm-view-timeline-btn" type="button" class="rm-view-btn">
+          <i class="fa-solid fa-list"></i> 라이브러리별
+        </button>
+      </div>
+    </div>
+    <div class="rm-toolbar-right">
+      <input id="rm-search-input" type="text" placeholder="라이브러리 이름 검색..." />
+      <button id="rm-refresh-btn" type="button" title="새로고침">
+        <i class="fa-solid fa-rotate"></i>
+      </button>
+    </div>
+  </div>
+
+  <div id="rm-grid-legend" class="rm-legend">
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#3b82f6"></i> 일반(general)</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#ec4899"></i> 성인(adult)</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#22c55e"></i> 오디오북(audiobook)</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#f97316"></i> 비디오(video)</span>
+    <span class="rm-legend-item rm-legend-sep"><i class="rm-dot rm-dot-overlap"></i> 같은 칸에 2개 이상 겹침</span>
+    <span class="rm-legend-item"><i class="fa-solid fa-calendar-day"></i> [매주] 실제 실행 요일 그대로 표시 · [월별] 매월 특정 일 일정을 요일 칸 전체에 참고용으로 표시</span>
+  </div>
+  <div id="rm-timeline-legend" class="rm-legend" hidden>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#94a3b8"></i> 매일</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#ef4444"></i> 일</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#f97316"></i> 월</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#eab308"></i> 화</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#22c55e"></i> 수</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#06b6d4"></i> 목</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#3b82f6"></i> 금</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#a855f7"></i> 토</span>
+    <span class="rm-legend-item"><i class="rm-dot" style="background:#6366f1;border-radius:2px"></i> 매월 특정 일</span>
+    <span class="rm-legend-item rm-legend-sep"><i class="rm-dot rm-dot-overlap"></i> 겹치는 시간대(빨간 테두리)</span>
+    <span class="rm-legend-item"><i class="fa-solid fa-cloud"></i> 원격(rclone) 마운트</span>
+    <span class="rm-legend-item"><i class="fa-solid fa-arrows-rotate"></i> 스캔 전 VFS refresh</span>
+  </div>
+
+  <div id="rm-status" class="rm-status">불러오는 중...</div>
+
+  <div id="rm-timetable" class="rm-timetable"></div>
+
+  <!-- 스케줄 편집 패널 (연필 아이콘 클릭 시 오픈, 기본 숨김) -->
+  <div id="rm-edit-overlay" class="rm-edit-overlay" hidden>
+    <div class="rm-edit-panel">
+      <div class="rm-edit-topbar">
+        <div class="rm-edit-title">
+          <i class="fa-solid fa-pen"></i>
+          <span id="rm-edit-libname">라이브러리</span>
+        </div>
+        <div class="rm-edit-actions">
+          <button id="rm-edit-save-btn" type="button" class="rm-btn-primary">
+            <i class="fa-solid fa-floppy-disk"></i> 저장
+          </button>
+          <button id="rm-edit-close-btn" type="button" class="rm-btn-ghost" title="닫기">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="rm-edit-body">
+        <div class="rm-helper-title">
+          <i class="fa-solid fa-wand-magic-sparkles"></i> 스케줄 도우미
+          <span class="rm-helper-hint">쉬운 설정을 Cron식으로 자동 변환</span>
+        </div>
+
+        <div class="rm-helper-grid">
+          <div class="rm-field">
+            <label>반복 유형</label>
+            <select id="rm-repeat-type">
+              <option value="daily">매일</option>
+              <option value="weekly">매주 특정 요일</option>
+              <option value="monthly">매월 특정 일</option>
+              <option value="manual">직접 입력 (Cron)</option>
+            </select>
+          </div>
+          <div class="rm-field" id="rm-time-field">
+            <label>실행 시간</label>
+            <input type="time" id="rm-repeat-time" value="03:00" />
+          </div>
+        </div>
+
+        <div class="rm-field" id="rm-dow-field">
+          <label>요일 (여러 개 선택 가능)</label>
+          <div class="rm-dow-checks" id="rm-repeat-dow-checks">
+            <label class="rm-dow-check"><input type="checkbox" value="1" /> 월</label>
+            <label class="rm-dow-check"><input type="checkbox" value="2" /> 화</label>
+            <label class="rm-dow-check"><input type="checkbox" value="3" /> 수</label>
+            <label class="rm-dow-check"><input type="checkbox" value="4" /> 목</label>
+            <label class="rm-dow-check"><input type="checkbox" value="5" /> 금</label>
+            <label class="rm-dow-check"><input type="checkbox" value="6" /> 토</label>
+            <label class="rm-dow-check"><input type="checkbox" value="0" /> 일</label>
+          </div>
+        </div>
+
+        <div class="rm-field" id="rm-dom-field">
+          <label>일 (1~31, 말일이 없는 달은 자동으로 건너뜁니다)</label>
+          <select id="rm-repeat-dom">
+            <option value="1">1일</option>
+            <option value="2">2일</option>
+            <option value="3">3일</option>
+            <option value="4">4일</option>
+            <option value="5">5일</option>
+            <option value="6">6일</option>
+            <option value="7">7일</option>
+            <option value="8">8일</option>
+            <option value="9">9일</option>
+            <option value="10">10일</option>
+            <option value="11">11일</option>
+            <option value="12">12일</option>
+            <option value="13">13일</option>
+            <option value="14">14일</option>
+            <option value="15">15일</option>
+            <option value="16">16일</option>
+            <option value="17">17일</option>
+            <option value="18">18일</option>
+            <option value="19">19일</option>
+            <option value="20">20일</option>
+            <option value="21">21일</option>
+            <option value="22">22일</option>
+            <option value="23">23일</option>
+            <option value="24">24일</option>
+            <option value="25">25일</option>
+            <option value="26">26일</option>
+            <option value="27">27일</option>
+            <option value="28">28일</option>
+            <option value="29">29일</option>
+            <option value="30">30일</option>
+            <option value="31">31일</option>
+          </select>
+        </div>
+
+        <div class="rm-summary-line" id="rm-helper-summary"></div>
+
+        <div class="rm-field">
+          <label>Cron식</label>
+          <input type="text" id="rm-cron-text" spellcheck="false" />
+        </div>
+
+        <div id="rm-save-error" class="rm-save-error" hidden></div>
+
+        <div class="rm-edit-preview-label">
+          <i class="fa-solid fa-eye"></i> 미리보기 (저장 전 · 타임테이블에 바로 반영됨)
+        </div>
+      </div>
+    </div>
+  </div>
     </div>
   </section>
 

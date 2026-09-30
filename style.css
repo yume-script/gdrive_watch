@@ -546,3 +546,631 @@
   .gdw-ev-detail { margin-left: 16px; }
   .gdw-checkline { grid-template-columns: 1fr; gap: 0; }
 }
+
+
+/* ─────────────── 스캔 일정 (구 scan_scheduler 스타일, 헤더 부분만 gdrive_watch 패널로 대체) ─────────────── */
+.rm-root { color: var(--app-text-primary); }
+.gdw-tally-inline { margin-top: 4px; }
+.gdw-flow-seg.gdw-static { cursor: default; }
+.gdw-flow-seg.gdw-static:hover { border-bottom-color: transparent; }
+.rm-live-icon { color: var(--gdw-ok); font-size: 0.9em; }
+.rm-grid-chip.rm-grid-chip-live::after { content: " ⚡"; font-size: 0.85em; }
+.rm-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.rm-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#rm-search-input {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.18));
+  background: var(--app-input-bg, var(--app-bg-main));
+  color: var(--app-text-primary);
+  font-family: inherit;
+  min-width: 200px;
+}
+
+#rm-refresh-btn {
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.18));
+  background: var(--app-bg-card);
+  color: var(--app-text-primary);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+#rm-refresh-btn:hover {
+  background: var(--app-bg-card-hover);
+}
+
+.rm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--app-text-secondary, var(--app-text-muted));
+}
+.rm-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.rm-legend-sep {
+  padding-left: 16px;
+  border-left: 1px solid var(--app-border, rgba(255, 255, 255, 0.2));
+}
+
+.rm-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.rm-dot-overlap {
+  background: transparent;
+  box-shadow: 0 0 0 2px #c0554f;
+}
+
+.rm-status {
+  margin-bottom: 8px;
+  color: var(--app-text-muted);
+}
+
+.rm-timetable {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.rm-scope-block {
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.15));
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.rm-scope-header {
+  padding: 8px 12px;
+  font-weight: 600;
+  background: var(--app-bg-card);
+  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.15));
+  color: var(--app-text-primary);
+}
+
+.rm-scope-empty {
+  padding: 12px;
+  color: var(--app-text-muted);
+  font-size: 13px;
+}
+
+/* ---- 시간축 헤더 ---- */
+.rm-axis-row {
+  display: flex;
+  padding: 4px 12px 2px 172px;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+.rm-axis-cell {
+  flex: 1;
+  text-align: left;
+}
+
+/* ---- 라이브러리 행 ---- */
+.rm-lib-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-top: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
+}
+
+.rm-lib-label {
+  width: 160px;
+  min-width: 160px;
+  padding-right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--app-text-secondary, var(--app-text-primary));
+}
+.rm-lib-icons {
+  display: inline-flex;
+  gap: 4px;
+  color: var(--app-text-muted);
+  font-size: 11px;
+}
+
+.rm-timeline {
+  position: relative;
+  flex: 1;
+  height: 22px;
+  background: repeating-linear-gradient(
+    to right,
+    var(--app-border, rgba(255, 255, 255, 0.12)) 0,
+    var(--app-border, rgba(255, 255, 255, 0.12)) 1px,
+    transparent 1px,
+    transparent calc(100% / 24)
+  );
+  border-radius: 4px;
+}
+
+.rm-marker {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: #94a3b8; /* JS가 요일별 색으로 덮어씀(fallback) */
+  cursor: default;
+}
+/* 겹침은 채우기 색(=요일색)은 그대로 두고 오류색 테두리+펄스만 추가해서
+   요일 구분과 겹침 표시를 동시에 볼 수 있게 한다 */
+.rm-marker.rm-overlap {
+  box-shadow: 0 0 0 3px var(--app-bg-main, #0b1220), 0 0 0 5px #c0554f;
+  animation: rm-pulse 1.6s infinite;
+}
+.rm-marker.rm-many {
+  width: 6px;
+  height: 6px;
+}
+
+@keyframes rm-pulse {
+  0% {
+    box-shadow: 0 0 0 3px var(--app-bg-main, #0b1220), 0 0 0 5px rgba(192, 85, 79, 0.9);
+  }
+  50% {
+    box-shadow: 0 0 0 3px var(--app-bg-main, #0b1220), 0 0 0 8px rgba(192, 85, 79, 0.3);
+  }
+  100% {
+    box-shadow: 0 0 0 3px var(--app-bg-main, #0b1220), 0 0 0 5px rgba(192, 85, 79, 0.9);
+  }
+}
+
+.rm-no-schedule {
+  font-size: 11px;
+  color: var(--app-text-muted);
+  padding-left: 4px;
+}
+
+/* 매월 특정 일(dom) 발생은 요일 마커(원형)와 구분되도록 사각형으로 표시 */
+.rm-marker-monthly {
+  border-radius: 3px;
+}
+
+/* 매월 마커 + "N일" 텍스트를 함께 담는 래퍼. .rm-marker는 absolute 배치가 기본이라
+   래퍼 안에서는 static으로 바꿔 나란히 놓고, 래퍼 자체를 timeline 위 pct 위치에 배치한다. */
+.rm-monthly-marker-wrap {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: default;
+  z-index: 1;
+}
+.rm-monthly-marker-wrap.rm-overlap .rm-marker-monthly {
+  box-shadow: 0 0 0 3px var(--app-bg-main, #0b1220), 0 0 0 5px #c0554f;
+  animation: rm-pulse 1.6s infinite;
+}
+.rm-monthly-marker-label {
+  font-size: 10px;
+  line-height: 1;
+  color: #6366f1;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--app-bg-main, #0b1220);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+/* 매주 마커 + 요일 한 글자 텍스트를 함께 담는 래퍼 (매월과 동일한 패턴, 색상은 JS가
+   요일별로 inline 지정) */
+.rm-weekly-marker-wrap {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: default;
+  z-index: 1;
+}
+.rm-weekly-marker-wrap.rm-overlap .rm-marker {
+  box-shadow: 0 0 0 3px var(--app-bg-main, #0b1220), 0 0 0 5px #c0554f;
+  animation: rm-pulse 1.6s infinite;
+}
+.rm-weekly-marker-label {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--app-bg-main, #0b1220);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+/* ==================== 스케줄 편집 패널 ==================== */
+.rm-edit-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55) !important;
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+/* .rm-edit-overlay의 display:flex가 [hidden] 속성보다 우선 적용되어 버려서
+   (동일 우선순위에서 저자 스타일이 UA 기본 스타일을 이기기 때문에) 패널이
+   페이지 로드 시부터 항상 떠 있던 버그 수정. hidden이 붙어있으면 무조건
+   숨긴다. */
+.rm-edit-overlay[hidden] {
+  display: none !important;
+}
+
+.rm-edit-panel {
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--app-bg-card);
+  color: var(--app-text-primary);
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.18));
+  border-radius: 12px;
+  box-shadow: var(--app-shadow, 0 25px 70px rgba(0, 0, 0, 0.7));
+}
+
+.rm-edit-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.15));
+  position: sticky;
+  top: 0;
+  background: var(--app-bg-card);
+  border-radius: 12px 12px 0 0;
+}
+
+.rm-edit-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--app-text-primary);
+}
+
+.rm-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 45%, transparent);
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.rm-btn-primary:hover {
+  background: color-mix(in srgb, var(--app-accent) 30%, transparent);
+  transform: translateY(-1px);
+}
+.rm-btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.rm-btn-ghost {
+  background: transparent;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.25));
+  color: var(--app-text-primary);
+  border-radius: 6px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+}
+.rm-btn-ghost:hover {
+  background: var(--app-bg-card-hover);
+}
+
+.rm-edit-body {
+  padding: 16px;
+}
+
+.rm-helper-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--app-text-primary);
+}
+.rm-helper-hint {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+  font-weight: 400;
+}
+
+.rm-helper-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.rm-field {
+  margin-bottom: 12px;
+}
+.rm-field label {
+  display: block;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  margin-bottom: 4px;
+}
+.rm-field select,
+.rm-field input[type="time"],
+.rm-field input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.2));
+  background: var(--app-input-bg, var(--app-bg-main));
+  color: var(--app-text-primary);
+  font-family: inherit;
+  font-size: 13.5px;
+}
+
+.rm-dow-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rm-dow-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.2));
+  background: var(--app-input-bg, var(--app-bg-main));
+  color: var(--app-text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.rm-dow-check:has(input:checked) {
+  border-color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+  color: var(--app-accent);
+}
+.rm-dow-check input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.rm-summary-line {
+  font-size: 12.5px;
+  color: var(--app-accent);
+  margin: -4px 0 14px 0;
+  min-height: 16px;
+}
+
+.rm-save-error {
+  font-size: 12.5px;
+  color: color-mix(in srgb, #c0554f 88%, var(--app-text-primary));
+  background: color-mix(in srgb, #c0554f 12%, transparent);
+  border: 1px solid color-mix(in srgb, #c0554f 40%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+.rm-edit-preview-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  margin: 6px 0 4px 0;
+}
+
+/* 메인 타임테이블에서 지금 편집 중인 행 강조 */
+.rm-lib-row.rm-editing {
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+  border-radius: 6px;
+}
+/* 편집 중인 라이브러리의 마커는 요일색은 유지하고(JS의 inline
+   background-color가 우선 적용됨) accent색 outline만 덧붙여 표시한다 */
+.rm-lib-row.rm-editing .rm-marker {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+}
+
+.rm-edit-btn {
+  border: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+.rm-edit-btn:hover {
+  color: var(--app-text-primary);
+}
+
+/* ==================== 뷰 토글 버튼 ==================== */
+.rm-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.2));
+  border-radius: 6px;
+  overflow: hidden;
+}
+.rm-view-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-secondary, var(--app-text-muted));
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.rm-view-btn + .rm-view-btn {
+  border-left: 1px solid var(--app-border, rgba(255, 255, 255, 0.2));
+}
+.rm-view-btn.active {
+  background: color-mix(in srgb, var(--app-accent) 20%, transparent);
+  color: var(--app-accent);
+}
+.rm-view-btn:hover {
+  color: var(--app-text-primary);
+}
+
+/* ==================== 요일 x 시간 그리드 뷰 ==================== */
+.rm-grid-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.15));
+  border-radius: 10px;
+}
+
+.rm-grid-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  table-layout: fixed;
+}
+
+.rm-grid-table th,
+.rm-grid-table td {
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.1));
+  padding: 3px 4px;
+  vertical-align: top;
+  text-align: left;
+}
+
+.rm-grid-corner,
+.rm-grid-daycol {
+  position: sticky;
+  top: 0;
+  background: var(--app-bg-card);
+  z-index: 2;
+  font-weight: 600;
+  text-align: center;
+  padding: 6px 4px;
+  color: var(--app-text-secondary, var(--app-text-primary));
+}
+
+.rm-grid-hourcol {
+  position: sticky;
+  left: 0;
+  background: var(--app-bg-card);
+  z-index: 1;
+  width: 56px;
+  min-width: 56px;
+  text-align: center;
+  color: var(--app-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rm-grid-corner {
+  left: 0;
+  z-index: 3;
+}
+
+.rm-grid-cell {
+  min-width: 92px;
+  max-height: 46px;
+  overflow-y: auto;
+}
+.rm-grid-cell.rm-grid-overlap {
+  background: color-mix(in srgb, #c0554f 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #c0554f 45%, transparent);
+}
+
+/* 매 정시(00분) 행 위쪽에 살짝 진한 구분선을 넣어 30분 단위 표에서도
+   시간 경계를 한눈에 알아보기 쉽게 한다 */
+.rm-grid-row.rm-grid-hour-start td {
+  border-top: 1px solid var(--app-border, rgba(255, 255, 255, 0.3));
+}
+
+.rm-grid-chip {
+  display: block;
+  padding: 1px 5px;
+  margin-bottom: 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+.rm-grid-chip:hover {
+  filter: brightness(1.25);
+}
+.rm-grid-chip-editing {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+/* [월별] 접두사가 붙은 칩: 특정 요일에 고정된 게 아니라 편의상 모든 요일 칸에
+   동일하게 표시된 것임을 시각적으로도 구분할 수 있게 점선 테두리를 추가 */
+.rm-grid-chip-monthly {
+  border: 1px dashed currentColor;
+}
+
+/* ==================== 드래그 앤 드롭 (그리드 뷰) ==================== */
+.rm-grid-chip {
+  cursor: grab;
+}
+.rm-grid-chip:active {
+  cursor: grabbing;
+}
+.rm-grid-chip.rm-dragging {
+  opacity: 0.35;
+}
+.rm-grid-cell.rm-grid-drop-target {
+  outline: 2px dashed var(--app-accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+}

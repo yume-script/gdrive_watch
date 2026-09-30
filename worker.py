@@ -58,6 +58,45 @@ def compile_patterns(lines):
     return out
 
 
+def _cron_field(field, value, low, high):
+    for part in field.split(","):
+        step = 1
+        if "/" in part:
+            part, step = part.split("/", 1)
+            step = max(1, int(step))
+        if part in ("*", ""):
+            start, end = low, high
+        elif "-" in part:
+            start, end = (int(x) for x in part.split("-", 1))
+        else:
+            start = end = int(part)
+            if step > 1:
+                end = high
+        if start <= value <= end and (value - start) % step == 0:
+            return True
+    return False
+
+
+def cron_matches(cron, when):
+    """표준 5필드 cron(분 시 일 월 요일)이 이 시각(분 단위)에 실행되는지."""
+    fields = str(cron or "").split()
+    if len(fields) < 5:
+        return False
+    try:
+        minute, hour, dom, month, dow = fields[:5]
+        weekday = (when.weekday() + 1) % 7  # cron: 0=일요일
+        dow_ok = _cron_field(dow, weekday, 0, 7) or (weekday == 0 and _cron_field(dow, 7, 0, 7))
+        dom_ok = _cron_field(dom, when.day, 1, 31)
+        if dom != "*" and dow != "*":
+            day_ok = dom_ok or dow_ok  # 둘 다 지정되면 cron은 OR로 본다
+        else:
+            day_ok = dom_ok and dow_ok
+        return (_cron_field(minute, when.minute, 0, 59) and _cron_field(hour, when.hour, 0, 23)
+                and _cron_field(month, when.month, 1, 12) and day_ok)
+    except ValueError:
+        return False
+
+
 def screen_event(event):
     """무시 패턴에 걸리는 쪽 경로를 빼서 이벤트를 다듬는다.
     [업로드] → 실제 폴더로 옮긴 경우는 '추가'로, 실제 폴더 → [업로드]는 '삭제'로 바뀐다. 둘 다 걸리면 None."""
@@ -271,7 +310,7 @@ class Store:
             (time.time(), limit)).fetchall()
         return [dict(row) for row in rows]
 
-    def finish(self, event, status, message, result, max_attempts):
+    def finish(self, event, status, message, result, max_attempts, retry_in=None):
         now = datetime.now().isoformat(timespec="seconds")
         payload = json.dumps(result, ensure_ascii=False)
         with self.db:
@@ -281,7 +320,7 @@ class Store:
                 return status
             if status == "waiting":  # 파일이 아직 안 보임: 시도 횟수는 올리지 않고 잠시 뒤 다시
                 self.db.execute("UPDATE event SET status='waiting', ready_at=?, message=?, result=? WHERE id=?",
-                                (time.time() + FILE_WAIT_INTERVAL, message[:2000], payload, event["id"]))
+                                (time.time() + (retry_in or FILE_WAIT_INTERVAL), message[:2000], payload, event["id"]))
                 return status
             attempts = event["attempts"] + 1
             status = "failed" if attempts >= max_attempts else "pending"
@@ -1595,6 +1634,9 @@ class BookOasis:
         self.token = cfg.get("webhook_token") or os.environ.get("WEBHOOK_TOKEN", "")
         self.timeout = int(cfg.get("scan_timeout", 300))
         self.file_wait = max(0, int(cfg.get("file_wait_minutes", 10)))  # 0이면 확인하지 않음
+        self.guard = max(0, int(cfg.get("full_scan_guard_minutes", 30)))  # 전체 스캔 시간대 회피(분), 0이면 끔
+        self.crons = {(lib["db_type"], int(lib["id"])): lib.get("cron_schedule") or ""
+                      for lib in libraries or [] if lib.get("id") is not None}
         self.libraries = []
         for lib in libraries or []:
             for root in lib.get("roots") or []:
@@ -1608,6 +1650,18 @@ class BookOasis:
 
     def library_for(self, path):
         return next((lib for lib in self.libraries if under(path, lib["root"])), None)
+
+    def full_scan_until(self, lib):
+        """그 보관함의 전체 스캔(cron)이 최근 guard분 안에 시작됐으면, 회피가 끝나는 시각."""
+        cron = self.crons.get((lib["db_type"], lib["id"])) if lib else ""
+        if not self.guard or not cron:
+            return None
+        now = datetime.now().replace(second=0, microsecond=0)
+        for back in range(self.guard + 1):
+            started = now - timedelta(minutes=back)
+            if cron_matches(cron, started):
+                return started + timedelta(minutes=self.guard)
+        return None
 
     def _post(self, lib, rel):
         form = {"token": self.token, "library_id": lib["id"], "type": lib["db_type"], "force": "0"}
@@ -1756,6 +1810,15 @@ class BookOasis:
         for d in kept:
             if STOP:
                 break
+            until = self.full_scan_until(self.library_for(d))
+            if until:
+                wait = max(60, int((until - datetime.now()).total_seconds()))
+                for event_id in wanted[d]["events"]:
+                    results[event_id]["deferred"] = wait
+                    results[event_id]["messages"].append(
+                        f"보관함 전체 스캔 시간대라 부분 스캔을 {until.strftime('%H:%M')}까지 미룸")
+                log.info("전체 스캔 시간대 회피: %s → %s 이후 스캔", d, until.strftime("%H:%M"))
+                continue
             try:
                 ok, message, lib = self.scan(d, wanted[d]["removed"])
             except Exception as error:
@@ -1777,7 +1840,7 @@ class BookOasis:
             r = results[ev["id"]]
             if r.get("timeout"):
                 status = "timeout"
-            elif r.get("waiting"):
+            elif r.get("waiting") or (r.get("deferred") and r["ok"] and not r["scans"]):
                 status = "waiting"
             elif not r["ok"]:
                 status = "failed"
@@ -1790,7 +1853,7 @@ class BookOasis:
                 r["messages"].append("워커 중지로 처리 미완료")
             message = "; ".join(r["messages"]) or ("보관함 밖 경로" if status == "skipped" else "")
             final[ev["id"]] = {"status": status, "message": message, "vfs": r["vfs"], "scans": r["scans"],
-                               "terminal": bool(r.get("terminal"))}
+                               "terminal": bool(r.get("terminal")), "retry_in": r.get("deferred")}
         return final
 
 
@@ -2096,7 +2159,7 @@ class Worker:
         for ev in events:
             r = results[ev["id"]]
             status = self.store.finish(ev, r["status"], r["message"], {"vfs": r["vfs"], "scans": r["scans"]},
-                                       1 if r.get("terminal") else max_attempts)
+                                       1 if r.get("terminal") else max_attempts, r.get("retry_in"))
             if r["status"] in ("failed", "timeout"):
                 log.warning("이벤트 #%d %s → %s: %s", ev["id"], ev["path"] or ev["removed_path"], status, r["message"])
             elif r["status"] == "waiting" and not ev["message"]:
