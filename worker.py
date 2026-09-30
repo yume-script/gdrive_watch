@@ -37,6 +37,7 @@ log = logging.getLogger("gdrive_watch")
 STOP = False
 SEEDERS = {}  # 감시 폴더 이름 → 기존 파일 목록 수집 스레드/프로세스
 IGNORE = []   # 무시할 경로 정규식 (설정에서 적용)
+FILE_WAIT_INTERVAL = 20  # 파일이 마운트에 보일 때까지 다시 확인하는 간격(초)
 DEFAULT_IGNORE_PATTERNS = [
     r"[/\\]\[업로드\]([/\\]|$)",                      # 업로드 중인 임시 폴더
     r"[/\\]\.(?!bookoasisignore$)[^/\\]+",           # 숨김 파일·폴더
@@ -266,7 +267,7 @@ class Store:
 
     def claim(self, limit=500):
         rows = self.db.execute(
-            "SELECT * FROM event WHERE status='pending' AND ready_at<=? ORDER BY ready_at, id LIMIT ?",
+            "SELECT * FROM event WHERE status IN ('pending','waiting') AND ready_at<=? ORDER BY ready_at, id LIMIT ?",
             (time.time(), limit)).fetchall()
         return [dict(row) for row in rows]
 
@@ -274,9 +275,13 @@ class Store:
         now = datetime.now().isoformat(timespec="seconds")
         payload = json.dumps(result, ensure_ascii=False)
         with self.db:
-            if status in ("done", "skipped"):
+            if status in ("done", "skipped", "timeout"):
                 self.db.execute("UPDATE event SET status=?, message=?, result=?, finished=? WHERE id=?",
                                 (status, message[:2000], payload, now, event["id"]))
+                return status
+            if status == "waiting":  # 파일이 아직 안 보임: 시도 횟수는 올리지 않고 잠시 뒤 다시
+                self.db.execute("UPDATE event SET status='waiting', ready_at=?, message=?, result=? WHERE id=?",
+                                (time.time() + FILE_WAIT_INTERVAL, message[:2000], payload, event["id"]))
                 return status
             attempts = event["attempts"] + 1
             status = "failed" if attempts >= max_attempts else "pending"
@@ -290,7 +295,7 @@ class Store:
     def cleanup(self, days):
         cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
         with self.db:
-            self.db.execute("DELETE FROM event WHERE status IN ('done','skipped') AND created<?", (cutoff,))
+            self.db.execute("DELETE FROM event WHERE status IN ('done','skipped','timeout') AND created<?", (cutoff,))
 
 
 # ─────────────────────────── rclone / Drive 인증 ───────────────────────────
@@ -1589,6 +1594,7 @@ class BookOasis:
         self.url = str(cfg.get("bookoasis_url") or "http://127.0.0.1:5930").rstrip("/")
         self.token = cfg.get("webhook_token") or os.environ.get("WEBHOOK_TOKEN", "")
         self.timeout = int(cfg.get("scan_timeout", 300))
+        self.file_wait = max(0, int(cfg.get("file_wait_minutes", 10)))  # 0이면 확인하지 않음
         self.libraries = []
         for lib in libraries or []:
             for root in lib.get("roots") or []:
@@ -1695,16 +1701,44 @@ class BookOasis:
                             results[event_id]["ok"] = False
                             results[event_id]["messages"].append(f"VFS {op} 실패: {err}")
 
-        # 2) 스캔할 디렉터리 (VFS 실패 이벤트는 보류) → 상위 폴더로 합치기
-        wanted = {}
+        # 2) 마운트에 실제로 보이는지 확인 (plex_mate 방식): 추가·수정은 보일 때까지, 삭제는 사라질 때까지 기다린다.
+        #    rclone 목록 반영이 늦을 때 빈 폴더를 스캔하고 '반영됨'으로 끝나는 것을 막는다.
+        if self.file_wait:
+            now = datetime.now()
+            for ev in events:
+                r = results[ev["id"]]
+                if not r["ok"] or ev.get("root") in getattr(self, "skip_vfs", ()):
+                    continue
+                target = ev["removed_path"] if ev["action"] == "delete" else ev["path"]
+                if not target or not self.library_for(target):
+                    continue
+                want = ev["action"] != "delete"
+                if os.path.exists(target) == want:
+                    continue
+                try:
+                    waited = (now - datetime.fromisoformat(ev["created"])).total_seconds()
+                except (TypeError, ValueError):
+                    waited = 0
+                state = "보이지" if want else "사라지지"
+                if waited >= self.file_wait * 60:
+                    r["timeout"] = True
+                    r["messages"].append(f"{self.file_wait}분 동안 마운트에서 파일이 {state} 않았습니다. rclone 마운트 상태를 확인하세요.")
+                else:
+                    r["waiting"] = True
+                    r["messages"].append(f"마운트에 아직 {state} 않음 · {int(waited)}초 대기 중 (최대 {self.file_wait}분)")
+
+        # 3) 스캔할 디렉터리 (VFS 실패·파일 대기 이벤트는 보류) → 상위 폴더로 합치기
+        wanted, own = {}, {}
         for ev in events:
-            if not results[ev["id"]]["ok"]:
+            r = results[ev["id"]]
+            if not r["ok"] or r.get("waiting") or r.get("timeout"):
                 continue
             dirs = []
             if ev["action"] != "delete" and ev["path"]:
                 dirs.append((ev["path"] if ev["item_type"] == "directory" else posixpath.dirname(ev["path"]), False))
             if ev["removed_path"] and (ev["action"] == "delete" or ev["removed_path"] != ev["path"]):
                 dirs.append((posixpath.dirname(ev["removed_path"]), True))
+            own[ev["id"]] = {d for d, _ in dirs}
             for d, is_removed in dirs:
                 entry = wanted.setdefault(d, {"events": set(), "removed": False})
                 entry["events"].add(ev["id"])
@@ -1718,7 +1752,7 @@ class BookOasis:
             else:
                 kept.append(d)
 
-        # 3) 스캔 요청
+        # 4) 스캔 요청
         for d in kept:
             if STOP:
                 break
@@ -1730,7 +1764,8 @@ class BookOasis:
             if ok is not None:
                 log.info("스캔 %s %s [%s] %s", "OK" if ok else "실패", d, label, message)
             for event_id in wanted[d]["events"]:
-                results[event_id]["scans"].append({"dir": d, "library": label, "ok": ok, "msg": message})
+                results[event_id]["scans"].append({"dir": d, "library": label, "ok": ok, "msg": message,
+                                                   "merged": d not in own.get(event_id, ())})
                 if ok is False:
                     results[event_id]["ok"] = False
                     if "토큰 불일치" in message:
@@ -1740,7 +1775,11 @@ class BookOasis:
         final = {}
         for ev in events:
             r = results[ev["id"]]
-            if not r["ok"]:
+            if r.get("timeout"):
+                status = "timeout"
+            elif r.get("waiting"):
+                status = "waiting"
+            elif not r["ok"]:
                 status = "failed"
             elif r["scans"] and all(s["ok"] is None for s in r["scans"]):
                 status = "skipped"
@@ -1799,7 +1838,7 @@ class Notifier:
         if not self.enabled:
             return
         done = [ev for ev in events if results[ev["id"]]["status"] == "done"]
-        failed = [ev for ev in events if results[ev["id"]]["status"] == "failed"]
+        failed = [ev for ev in events if results[ev["id"]]["status"] in ("failed", "timeout")]
         embeds = []
         if self.on_done and done:
             libs = sorted({s["library"] for ev in done for s in results[ev["id"]]["scans"] if s.get("ok") and s.get("library")})
@@ -2029,7 +2068,7 @@ class Worker:
             elif local.snapshot is not None:
                 self.notifier.root_ok(local.name)
         self.state["last_poll"] = datetime.now().isoformat(timespec="seconds")
-        row = self.store.db.execute("SELECT COUNT(*), MIN(ready_at) FROM event WHERE status='pending'").fetchone()
+        row = self.store.db.execute("SELECT COUNT(*), MIN(ready_at) FROM event WHERE status IN ('pending','waiting')").fetchone()
         if row and row[0]:
             wait = max(0, int(row[1] - time.time()))
             lines.append(f"처리 대기 {row[0]}건" + (f" (다음 처리 {wait}초 후)" if wait else " (곧 처리)"))
@@ -2058,8 +2097,10 @@ class Worker:
             r = results[ev["id"]]
             status = self.store.finish(ev, r["status"], r["message"], {"vfs": r["vfs"], "scans": r["scans"]},
                                        1 if r.get("terminal") else max_attempts)
-            if r["status"] == "failed":
+            if r["status"] in ("failed", "timeout"):
                 log.warning("이벤트 #%d %s → %s: %s", ev["id"], ev["path"] or ev["removed_path"], status, r["message"])
+            elif r["status"] == "waiting" and not ev["message"]:
+                log.info("이벤트 #%d %s: 마운트에 파일이 보일 때까지 대기", ev["id"], ev["path"] or ev["removed_path"])
         self.state["last_process"] = datetime.now().isoformat(timespec="seconds")
         return len(events)
 

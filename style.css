@@ -186,3 +186,7 @@
 .gdw-lib.ok { border-color: var(--gdw-ok); color: var(--gdw-ok); }
 .gdw-lib.ok::before { content: "→ "; }
 .gdw-lib.fail { border-color: var(--gdw-fail); color: var(--gdw-fail); }
+
+.gdw-manual { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.gdw-manual input { flex: 1 1 320px; }
+.gdw-ev-detail .msg.wait { color: var(--gdw-wait); }

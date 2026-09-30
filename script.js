@@ -10,7 +10,7 @@
     window.__gdwTimers = [];
 
     var ACTION = { create: '추가', edit: '수정', rename: '이동', move: '이동', delete: '삭제', restore: '복원' };
-    var STATUS = { pending: '대기', done: '반영됨', skipped: '보관함 밖', failed: '실패' };
+    var STATUS = { pending: '대기', waiting: '파일 대기', done: '반영됨', skipped: '보관함 밖', failed: '실패', timeout: '시간 초과' };
     var st = { status: '', q: '', page: 1, size: 50, total: 0, open: {}, picked: {}, tab: 'events', watch: null, alive: false };
 
     function $(sel) { return app.querySelector(sel); }
@@ -81,13 +81,16 @@
         (d.warnings || []).forEach(function (m) { warn.appendChild(el('li', { text: m })); });
         warn.hidden = !(d.warnings || []).length;
 
+        var c = d.counts || {};
+        var grouped = { pending: (c.pending || 0) + (c.waiting || 0), done: c.done || 0, skipped: c.skipped || 0,
+            failed: (c.failed || 0) + (c.timeout || 0) };
         ['pending', 'done', 'skipped', 'failed'].forEach(function (k) {
-            var b = app.querySelector('[data-count="' + k + '"]');
-            b.textContent = (d.counts && d.counts[k]) || 0;
+            app.querySelector('[data-count="' + k + '"]').textContent = grouped[k];
         });
         $$('.gdw-flow-seg').forEach(function (s) { s.classList.toggle('is-active', s.getAttribute('data-filter') === st.status); });
         var today = d.today || {};
-        bind('meta').textContent = '오늘 ' + ((today.done || 0) + (today.skipped || 0)) + '건 처리, 실패 ' + (today.failed || 0) +
+        bind('meta').textContent = '오늘 ' + ((today.done || 0) + (today.skipped || 0)) + '건 처리, 실패 ' + ((today.failed || 0) + (today.timeout || 0)) +
+            (c.waiting ? ' · 파일 대기 ' + c.waiting + '건' : '') +
             '건 · 보관함 ' + d.libraries + '개 인식' + (w.last_process ? ' · 마지막 처리 ' + shortTime(w.last_process) : '');
 
         var tbody = clear(bind('roots'));
@@ -143,8 +146,9 @@
     }
     function stage(ev, kind) {
         var list = (ev.result && ev.result[kind]) || [];
+        if (kind === 'scans' && (ev.status === 'waiting' || ev.status === 'timeout')) return ev.status === 'waiting' ? 'wait' : 'fail';
         if (!list.length) {
-            if (ev.status === 'pending') return 'wait';
+            if (ev.status === 'pending' || ev.status === 'waiting') return 'wait';
             if (kind === 'scans' && ev.status === 'failed') return 'none';
             return 'none';
         }
@@ -216,7 +220,7 @@
         var r = ev.result || {};
         var box = el('div', { class: 'gdw-ev-detail' });
         box.appendChild(el('div', { text: '감지 ' + (ev.created || '').replace('T', ' ') + (ev.finished ? ' · 처리 ' + ev.finished.replace('T', ' ') : '') + ' · 시도 ' + ev.attempts + '회' }));
-        if (ev.message) box.appendChild(el('div', { class: 'msg', text: ev.message }));
+        if (ev.message) box.appendChild(el('div', { class: ev.status === 'waiting' ? 'msg wait' : 'msg', text: ev.message }));
         box.appendChild(el('h4', { text: 'VFS 새로고침' }));
         var v = el('ul');
         (r.vfs || []).forEach(function (x) {
@@ -228,9 +232,11 @@
         var s = el('ul');
         (r.scans || []).forEach(function (x) {
             var cls = x.ok === true ? 'ok' : x.ok === false ? 'fail' : '';
-            s.appendChild(el('li', { class: cls, text: (x.library ? libraryName(x.library) + ' ← ' : '') + x.dir + (x.msg ? '  ' + x.msg : '') }));
+            s.appendChild(el('li', { class: cls, text: (x.library ? libraryName(x.library) + ' ← ' : '') + x.dir + (x.msg ? '  ' + x.msg : '') +
+                (x.merged ? '  (같은 묶음의 상위 폴더 스캔에 합쳐짐)' : '') }));
         });
-        if (!(r.scans || []).length) s.appendChild(el('li', { text: ev.status === 'pending' ? '처리 전' : 'VFS 실패로 스캔 보류' }));
+        if (!(r.scans || []).length) s.appendChild(el('li', { text: ev.status === 'pending' ? '처리 전' : ev.status === 'waiting' ? '파일이 마운트에 보이면 스캔' :
+            ev.status === 'timeout' ? '파일이 보이지 않아 스캔하지 않음' : 'VFS 실패로 스캔 보류' }));
         box.appendChild(s);
         return box;
     }
@@ -471,6 +477,11 @@
             }
             else if (a === 'log') loadLog();
             else if (a === 'check_rclone') checkRclone(false);
+            else if (a === 'manual_create' || a === 'manual_delete') {
+                var mp = bind('manual-path').value.trim();
+                if (!mp) return toast('반영할 경로를 입력하세요.', true);
+                act('manual', { path: mp, action: a === 'manual_delete' ? 'delete' : 'create' }).then(function () { bind('manual-path').value = ''; });
+            }
             else if (a === 'default_patterns') { st.watch.ignore_patterns = (st.defaultIgnore || []).slice(); renderOpts(); }
             else if (a === 'test_discord') { rpc('test_discord', { url: st.watch.discord_webhook || '' }).then(function (d) { toast(d.message); }).catch(function (err) { toast(err.message, true); }); }
             else if (a === 'check_token') {

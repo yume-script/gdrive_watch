@@ -192,6 +192,7 @@ DEFAULT_WATCH = {
     "keep_days": 30,
     "extensions": "",
     "verbose_log": False,
+    "file_wait_minutes": 10,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -401,9 +402,11 @@ class GDriveWatchProvider(BaseMetadataProvider):
         page = max(1, int(ctx.get("page") or 1))
         size = min(200, max(10, int(ctx.get("size") or 50)))
         where, params = [], []
+        groups = {"pending": ("pending", "waiting"), "failed": ("failed", "timeout")}
         if ctx.get("status"):
-            where.append("status=?")
-            params.append(ctx["status"])
+            wanted = groups.get(ctx["status"], (ctx["status"],))
+            where.append("status IN (" + ",".join("?" * len(wanted)) + ")")
+            params += list(wanted)
         if ctx.get("root"):
             where.append("root=?")
             params.append(ctx["root"])
@@ -431,12 +434,13 @@ class GDriveWatchProvider(BaseMetadataProvider):
         db = _db()
         with db:
             if ctx.get("all_failed"):
-                n = db.execute("UPDATE event SET status='pending', attempts=0, ready_at=0 WHERE status='failed'").rowcount
+                n = db.execute("UPDATE event SET status='pending', attempts=0, ready_at=0, created=? "
+                               "WHERE status IN ('failed','timeout')", (time.strftime("%Y-%m-%dT%H:%M:%S"),)).rowcount
             else:
                 ids = [int(i) for i in ctx.get("ids") or []]
                 marks = ",".join("?" * len(ids)) or "NULL"
-                n = db.execute(f"UPDATE event SET status='pending', attempts=0, ready_at=0 WHERE id IN ({marks})",
-                               ids).rowcount
+                n = db.execute(f"UPDATE event SET status='pending', attempts=0, ready_at=0, created=? WHERE id IN ({marks})",
+                               [time.strftime("%Y-%m-%dT%H:%M:%S")] + ids).rowcount
         db.close()
         open(_path("wake.flag"), "w").close()
         return {"success": True, "message": f"{n}건을 재시도 대기열에 넣었습니다."}
@@ -445,13 +449,39 @@ class GDriveWatchProvider(BaseMetadataProvider):
         db = _db()
         with db:
             if ctx.get("clear") == "done":
-                n = db.execute("DELETE FROM event WHERE status IN ('done','skipped')").rowcount
+                n = db.execute("DELETE FROM event WHERE status IN ('done','skipped','timeout')").rowcount
             else:
                 ids = [int(i) for i in ctx.get("ids") or []]
                 marks = ",".join("?" * len(ids)) or "NULL"
                 n = db.execute(f"DELETE FROM event WHERE id IN ({marks})", ids).rowcount
         db.close()
         return {"success": True, "message": f"{n}건을 삭제했습니다."}
+
+    def _rpc_manual(self, ctx):
+        """경로 직접 반영: 감시와 같은 처리(VFS 새로고침 → 파일 확인 → 스캔)를 태운다."""
+        worker = _load_worker_module()
+        path = worker.norm(str(ctx.get("path") or "").strip())
+        action = "delete" if ctx.get("action") == "delete" else "create"
+        if not path or path == "/":
+            return {"success": False, "error": "컨테이너 기준 절대 경로를 입력하세요."}
+        exists = os.path.exists(path)
+        if action == "create" and not exists:
+            note = " (아직 마운트에 보이지 않아 보일 때까지 기다립니다)"
+        elif action == "delete" and exists:
+            note = " (아직 마운트에 남아 있어 사라질 때까지 기다립니다)"
+        else:
+            note = ""
+        is_dir = os.path.isdir(path) if exists else (not os.path.splitext(path)[1])
+        libs = [lib for lib in self._libraries() for r in lib["roots"] if worker.under(path, r.rstrip("/"))]
+        db = _db()
+        with db:
+            db.execute("INSERT INTO event(root, action, item_type, path, removed_path, created, ready_at) VALUES(?,?,?,?,?,?,?)",
+                       ("수동 요청", action, "directory" if is_dir else "file", path, path if action == "delete" else "",
+                        time.strftime("%Y-%m-%dT%H:%M:%S"), 0))
+        db.close()
+        open(_path("wake.flag"), "w").close()
+        where = "" if libs else " 이 경로에 걸친 보관함이 없어 스캔은 건너뛰게 됩니다."
+        return {"success": True, "message": ("추가" if action == "create" else "삭제") + f"로 반영을 요청했습니다{note}.{where}"}
 
     def _rpc_reset_root(self, ctx):
         name = str(ctx.get("name") or "")
@@ -642,6 +672,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "keep_days": max(1, int(watch.get("keep_days") or 30)),
             "extensions": str(watch.get("extensions") or "").strip(),
             "verbose_log": bool(watch.get("verbose_log")),
+            "file_wait_minutes": max(0, int(watch.get("file_wait_minutes", 10) or 0)),
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),

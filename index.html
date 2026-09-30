@@ -42,10 +42,12 @@
     <div class="gdw-toolbar">
       <select data-bind="f-status" aria-label="상태">
         <option value="">전체 상태</option>
-        <option value="pending">대기</option>
+        <option value="pending">대기 (파일 대기 포함)</option>
+        <option value="waiting">파일 대기</option>
         <option value="done">반영됨</option>
         <option value="skipped">보관함 밖</option>
-        <option value="failed">실패</option>
+        <option value="failed">실패 (시간 초과 포함)</option>
+        <option value="timeout">시간 초과</option>
       </select>
       <input type="search" data-bind="f-q" placeholder="경로나 메시지 검색" aria-label="검색">
       <span class="gdw-grow"></span>
@@ -53,6 +55,11 @@
       <button type="button" class="gdw-btn gdw-btn-quiet" data-act="retry_failed">실패 전부 재시도</button>
       <button type="button" class="gdw-btn gdw-btn-quiet" data-act="delete_selected">선택 삭제</button>
       <button type="button" class="gdw-btn gdw-btn-quiet" data-act="clear_done">반영된 기록 정리</button>
+    </div>
+    <div class="gdw-manual">
+      <input type="text" data-bind="manual-path" placeholder="직접 반영할 경로 (컨테이너 기준, 예: /mnt/gds2/GDRIVE/READING/잡지/월간A)">
+      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="manual_create">추가로 반영</button>
+      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="manual_delete">삭제로 반영</button>
     </div>
     <ol class="gdw-events" data-bind="events"></ol>
     <div class="gdw-pager">
@@ -110,6 +117,7 @@
       <label>모아서 처리(초)<input type="number" min="0" data-opt="buffer_seconds"></label>
       <label>최대 재시도<input type="number" min="1" data-opt="max_attempts"></label>
       <label>기록 보관(일)<input type="number" min="1" data-opt="keep_days"></label>
+      <label title="VFS 새로고침 뒤 마운트에 파일이 실제로 보일 때까지 기다리는 최대 시간. 0이면 확인하지 않음">파일 확인 대기(분)<input type="number" min="0" data-opt="file_wait_minutes"></label>
       <label class="gdw-check"><input type="checkbox" data-opt="verbose_log"> 자세한 로그 (변경 하나하나를 어떻게 처리했는지 로그에 남김)</label>
       <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>
     </div>
