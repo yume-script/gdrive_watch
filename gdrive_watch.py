@@ -192,6 +192,11 @@ DEFAULT_WATCH = {
     "keep_days": 30,
     "extensions": "",
     "verbose_log": False,
+    "ignore_patterns": None,  # None이면 워커 기본값
+    "discord_webhook": "",
+    "notify_done": True,
+    "notify_failed": True,
+    "notify_error": True,
 }
 
 
@@ -336,6 +341,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             roots.append({
                 "name": name, "mode": root.get("mode", "changes"), "enabled": root.get("enabled", True),
                 "local_detect": root.get("local_detect", ""),
+                "fallback": (_read_json("fallback.json", {}) or {}).get(name, ""),
                 "local_root": root.get("local_root"), "status": cur["status"] if cur else "",
                 "error": cur["error"] if cur else "", "updated": cur["updated"] if cur else "",
                 "items": items, "last_event": last["created"] if last else "",
@@ -453,7 +459,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return {"success": False, "error": "루트 이름이 없습니다."}
         db = _db()
         with db:
-            for table in ("cursor", "item", "outside", "receipt"):
+            for table in ("cursor", "item", "outside", "receipt", "seedstate"):
                 db.execute(f"DELETE FROM {table} WHERE root=?", (name,))
         db.close()
         open(_path("wake.flag"), "w").close()
@@ -535,11 +541,15 @@ class GDriveWatchProvider(BaseMetadataProvider):
         settings = self._settings()
         watch = self._watch()
         watch.pop("env", None)
+        defaults = list(_load_worker_module().DEFAULT_IGNORE_PATTERNS)
+        if watch.get("ignore_patterns") is None:
+            watch["ignore_patterns"] = defaults
         return {"success": True, "watch": watch, "libraries": self._libraries(force=True), "legacy_removed": removed,
                 "settings": {"rclone_path": settings["rclone_path"], "rclone_config": settings["rclone_config"],
                              "bookoasis_url": settings["bookoasis_url"], "auto_start": settings["auto_start"],
                              "token_set": bool(settings["webhook_token"]),
-                             "env_token": bool(os.environ.get("WEBHOOK_TOKEN"))}}
+                             "env_token": bool(os.environ.get("WEBHOOK_TOKEN"))},
+                "default_ignore": defaults}
 
     def _rpc_save_env(self, ctx):
         env = ctx.get("env") or {}
@@ -601,6 +611,19 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 if (left["mode"] == "local" or right["mode"] == "local") and (l == r or l.startswith(r + "/") or r.startswith(l + "/")):
                     return {"success": False, "error": f"[{left['name']}]와 [{right['name']}]의 로컬 경로가 겹칩니다. "
                                                        "같은 폴더를 두 방식으로 감시하면 스캔이 중복됩니다."}
+        import re
+        raw = watch.get("ignore_patterns")
+        patterns = [l.strip() for l in (raw.splitlines() if isinstance(raw, str) else raw or []) if l.strip()]
+        for line in patterns:
+            if line.startswith("#"):
+                continue
+            try:
+                re.compile(line)
+            except re.error as error:
+                return {"success": False, "error": f"무시 패턴 오류: {line} ({error})"}
+        webhook = str(watch.get("discord_webhook") or "").strip()
+        if webhook and not webhook.startswith("https://discord.com/api/webhooks/") and not webhook.startswith("https://discordapp.com/api/webhooks/"):
+            return {"success": False, "error": "디스코드 웹훅 주소는 https://discord.com/api/webhooks/… 형식이어야 합니다."}
         vfs = []
         for index, rule in enumerate(watch.get("vfs") or [], 1):
             local, rc = str(rule.get("local") or "").strip(), str(rule.get("rc") or "").strip()
@@ -619,7 +642,19 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "keep_days": max(1, int(watch.get("keep_days") or 30)),
             "extensions": str(watch.get("extensions") or "").strip(),
             "verbose_log": bool(watch.get("verbose_log")),
+            "ignore_patterns": patterns,
+            "discord_webhook": webhook,
+            "notify_done": bool(watch.get("notify_done", True)),
+            "notify_failed": bool(watch.get("notify_failed", True)),
+            "notify_error": bool(watch.get("notify_error", True)),
         }
+        # 사용자가 방식을 다시 저장하면 자동 전환 기록은 지운다 (Activity로 다시 시도)
+        fallback = _read_json("fallback.json", {}) or {}
+        old_modes = {r.get("name"): r.get("mode") for r in (_read_json("watch.json", {}) or {}).get("roots") or []}
+        for r in roots:
+            if r["name"] in fallback and fallback[r["name"]] == "changes" and (r["mode"] != "activity" or old_modes.get(r["name"]) != "activity"):
+                fallback.pop(r["name"], None)
+        _write_json("fallback.json", fallback)
         data["env"] = (_read_json("watch.json", {}) or {}).get("env") or {}
         _write_json("watch.json", data)
         self._sync_runtime(force_libraries=True)
@@ -657,6 +692,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
                     tok = {}
                 item["expiry"] = tok.get("expiry", "")
                 item["scope_conf"] = conf.get("scope", "") or "drive (기본)"
+                item["auth_mode"] = _load_worker_module().Rclone.auth_mode(conf, tok)
                 item["granted"] = self._granted_scopes(tok)
                 item["custom_auth"] = any(k for k in conf if "endpoint" in k.lower())
                 item["team_drive"] = bool(conf.get("team_drive"))
@@ -693,12 +729,15 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return {"success": True, "checks": [{"label": "입력", "ok": False, "msg": "리모트, 폴더 ID, 로컬 경로(절대 경로)를 모두 입력하세요."}]}
 
         rclone = worker.Rclone(settings["rclone_path"], settings["rclone_config"], 60)
+        rclone.rc_sources = worker.rc_sources(self._watch().get("vfs"), self._libraries())
         api = worker.DriveApi(rclone, remote, 30)
         # 1) 토큰
         try:
             token = rclone.token(remote)
             where = f"공유 드라이브 {token['team_drive']}" if token["team_drive"] else "내 드라이브"
-            add("rclone 인증", True, f"{remote}: 토큰 정상 (만료 {token['expiry'].astimezone().strftime('%m-%d %H:%M')}, {where})")
+            how = {"memory": "플러그인이 메모리에서 갱신 · rclone.conf에 쓰지 않음", "custom": "커스텀 인증 · 공유 rclone이 갱신한 값을 읽음",
+                   "rclone": "rclone이 갱신해 rclone.conf에 저장"}.get(token.get("mode"), "")
+            add("rclone 인증", True, f"{remote}: 토큰 정상 (만료 {token['expiry'].astimezone().strftime('%m-%d %H:%M')}, {where}) · {how}")
         except Exception as error:
             add("rclone 인증", False, str(error))
             return {"success": True, "checks": checks}
@@ -732,15 +771,24 @@ class GDriveWatchProvider(BaseMetadataProvider):
         # 3) 변경을 받을 수 있는지
         drive_id = data.get("driveId") or ""
         if mode == "changes":
-            if token["team_drive"] and drive_id != token["team_drive"]:
-                add("변경 수신", False, "리모트가 다른 공유 드라이브 전용이라 이 폴더의 변경을 받을 수 없습니다. 폴더가 있는 드라이브의 리모트를 쓰세요.")
-            else:
-                try:
-                    params = {"driveId": token["team_drive"]} if token["team_drive"] else {}
-                    api.get("changes/startPageToken", **params)
-                    add("변경 수신", True, "Changes 사용 가능" + ("" if token["team_drive"] else " (내 드라이브 리모트: 드라이브 전체 변경 중 이 폴더 것만 골라냄)"))
-                except Exception as error:
-                    add("변경 수신", False, str(error))
+            try:
+                params = {"driveId": drive_id} if drive_id else {}
+                api.get("changes/startPageToken", **params)
+                note = ""
+                if token["team_drive"] and drive_id and drive_id != token["team_drive"]:
+                    note = f" (리모트 기본 드라이브 {token['team_drive']}와 달라도 같은 토큰으로 조회 가능)"
+                add("변경 수신", True, "Changes 사용 가능 · " + (f"공유 드라이브 {drive_id}의 변경만 받음{note}" if drive_id
+                                                           else "내 드라이브: 계정 전체 변경 중 이 폴더 것만 골라냄"))
+            except Exception as error:
+                if "membership" in str(error).lower():
+                    try:
+                        api.get("changes/startPageToken")
+                        add("변경 수신", None, "이 계정은 공유 드라이브 멤버가 아니라 폴더만 공유받았습니다. 계정 전체 변경 목록으로 "
+                                            "감시합니다(자동 전환). 공유받은 폴더의 변경이 이 목록에 오는지는 실제 변경으로 확인해야 합니다.")
+                    except Exception as inner:
+                        add("변경 수신", False, f"변경 목록을 받을 수 없습니다: {inner}")
+                else:
+                    add("변경 수신", False, f"이 드라이브의 변경 목록을 받을 수 없습니다: {error}")
         else:
             try:
                 now = worker.stamp(worker.utcnow())
@@ -951,6 +999,52 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return "확인 불가 (토큰 만료 — 갱신 후 다시 확인)"
         except (URLError, OSError, ValueError):
             return "확인 불가 (네트워크)"
+
+    def _rpc_test_token(self, ctx):
+        """메모리 갱신 리모트: 실제로 새 토큰을 받아 보되 rclone.conf에는 쓰지 않는다."""
+        remote = str(ctx.get("remote") or "").strip().rstrip(":")
+        worker = _load_worker_module()
+        settings = self._settings()
+        rclone = worker.Rclone(settings["rclone_path"], settings["rclone_config"], 60)
+        rclone.rc_sources = worker.rc_sources(self._watch().get("vfs"), self._libraries())
+        try:
+            conf, token, _ = rclone._read(remote)
+            if rclone.auth_mode(conf, token) != "memory":
+                return {"success": False, "error": "본인 client_id가 있는 리모트만 메모리 갱신을 시험할 수 있습니다."}
+            _, expiry = rclone._memory_refresh(remote, conf, token)
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+        return {"success": True, "message": f"{remote}: 메모리에서 새 토큰을 받았습니다 (만료 {expiry.astimezone().strftime('%H:%M')}). "
+                                            "rclone.conf는 바꾸지 않았습니다."}
+
+    def _rpc_test_rc_token(self, ctx):
+        """커스텀 인증 리모트: 마운트 중인 rclone RC에서 토큰을 읽어 올 수 있는지 확인 (파일에는 쓰지 않음)."""
+        remote = str(ctx.get("remote") or "").strip().rstrip(":")
+        worker = _load_worker_module()
+        settings = self._settings()
+        rclone = worker.Rclone(settings["rclone_path"], settings["rclone_config"], 60)
+        rclone.rc_sources = worker.rc_sources(self._watch().get("vfs"), self._libraries())
+        borrowed, notes = rclone._borrow_from_rc(remote)
+        if borrowed:
+            return {"success": True, "message": f"{remote}: 마운트 중인 rclone에서 유효한 토큰을 읽었습니다 "
+                                                f"(만료 {borrowed[1].astimezone().strftime('%H:%M')}). 자동 갱신이 동작합니다."}
+        header, note = rclone._token_from_headers(remote)
+        if header:
+            return {"success": True, "message": f"{remote}: rclone({settings['rclone_path']})이 쓰는 토큰을 가져왔습니다. "
+                                                "자동 갱신이 동작합니다 (45분마다 다시 가져옴)."}
+        return {"success": False, "error": f"{remote} 토큰을 가져오지 못했습니다: " + " / ".join(notes + [note])}
+
+    def _rpc_test_discord(self, ctx):
+        worker = _load_worker_module()
+        url = str(ctx.get("url") or self._watch().get("discord_webhook") or "").strip()
+        if not url:
+            return {"success": False, "error": "웹훅 주소를 입력하세요."}
+        notifier = worker.Notifier({"discord_webhook": url})
+        status = notifier.post([{"title": "드라이브 변경 감시 · 알림 시험", "color": 3447003,
+                                 "description": "이 채널로 처리 결과(반영됨·실패)와 감시 오류를 알립니다."}])
+        if status in (200, 204):
+            return {"success": True, "message": "디스코드로 시험 알림을 보냈습니다."}
+        return {"success": False, "error": f"전송 실패 (HTTP {status})" if status else "전송 실패 (연결 오류)"}
 
     def _rpc_preview(self, ctx):
         path = str(ctx.get("path") or "").strip()

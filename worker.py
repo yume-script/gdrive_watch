@@ -36,6 +36,41 @@ from urllib.request import Request, urlopen
 log = logging.getLogger("gdrive_watch")
 STOP = False
 SEEDERS = {}  # 감시 폴더 이름 → 기존 파일 목록 수집 스레드/프로세스
+IGNORE = []   # 무시할 경로 정규식 (설정에서 적용)
+DEFAULT_IGNORE_PATTERNS = [
+    r"[/\\]\[업로드\]([/\\]|$)",                      # 업로드 중인 임시 폴더
+    r"[/\\]\.(?!bookoasisignore$)[^/\\]+",           # 숨김 파일·폴더
+    r"\.(part|partial|tmp|temp|crdownload|!qb|aria2)$",  # 받는 중인 임시 파일
+]
+
+
+def ignored(path):
+    return bool(path) and any(p.search(path) for p in IGNORE)
+
+
+def compile_patterns(lines):
+    out = []
+    for line in lines or []:
+        line = str(line).strip()
+        if line and not line.startswith("#"):
+            out.append(re.compile(line, re.IGNORECASE))
+    return out
+
+
+def screen_event(event):
+    """무시 패턴에 걸리는 쪽 경로를 빼서 이벤트를 다듬는다.
+    [업로드] → 실제 폴더로 옮긴 경우는 '추가'로, 실제 폴더 → [업로드]는 '삭제'로 바뀐다. 둘 다 걸리면 None."""
+    path, removed = event["path"], event["removed_path"]
+    bad_new, bad_old = ignored(path), ignored(removed)
+    if event["action"] == "delete":
+        return None if bad_old else event
+    if bad_new and (not removed or bad_old or removed == path):
+        return None
+    if bad_new:
+        return dict(event, action="delete", path=removed, removed_path=removed)
+    if removed and bad_old:
+        return dict(event, action="create", removed_path="")
+    return event
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 ACTIVITY_API = "https://driveactivity.googleapis.com/v2/activity:query"
@@ -94,6 +129,7 @@ CREATE TABLE IF NOT EXISTS event(
 CREATE INDEX IF NOT EXISTS ix_event_ready ON event(status, ready_at);
 CREATE INDEX IF NOT EXISTS ix_event_created ON event(created);
 CREATE TABLE IF NOT EXISTS vfs_map(root TEXT PRIMARY KEY, rc TEXT, fs TEXT, remote TEXT, detected TEXT);
+CREATE TABLE IF NOT EXISTS seedstate(root TEXT PRIMARY KEY, started TEXT);
 CREATE TABLE IF NOT EXISTS root_stat(root TEXT PRIMARY KEY, checked TEXT, raw INTEGER, outside INTEGER, ext INTEGER,
                                      same INTEGER, events INTEGER, note TEXT, elapsed REAL);
 """
@@ -143,6 +179,24 @@ class Store:
     def set_item(self, root, file_id, item):
         with self.db:
             self._upsert(root, file_id, item)
+
+    def merge_items(self, root, rows):
+        """수집한 목록을 기존 항목 위에 합친다. 수집 중에 변경 처리로 이미 갱신된 항목은 건드리지 않는다."""
+        with self.db:
+            self.db.executemany(
+                "INSERT OR IGNORE INTO item(root, file_id, path, is_dir, sig) VALUES(?,?,?,?,?)",
+                [(root, row[0], row[1], int(row[2]), row[3] if len(row) > 3 else "") for row in rows])
+
+    def seed_pending(self, root):
+        return self.db.execute("SELECT 1 FROM seedstate WHERE root=?", (root,)).fetchone() is not None
+
+    def set_seed(self, root, pending):
+        with self.db:
+            if pending:
+                self.db.execute("INSERT OR REPLACE INTO seedstate VALUES(?,?)",
+                                (root, datetime.now().isoformat(timespec="seconds")))
+            else:
+                self.db.execute("DELETE FROM seedstate WHERE root=?", (root,))
 
     def replace_items(self, root, rows):
         with self.db:
@@ -255,6 +309,7 @@ class Rclone:
         self._tokens = {}
         self._conf_path = config or ""
         self._conf_stat = "init"
+        self.rc_sources = []  # 커스텀 인증 토큰을 빌려 올 rclone 마운트 RC 목록 ({"rc", "fs", "auth"})
 
     def config_path(self):
         """실제로 사용하는 rclone.conf 경로 (비어 있으면 rclone 기본 위치를 물어봄)."""
@@ -305,33 +360,158 @@ class Rclone:
         expiry = parse_time(token.get("expiry")) or utcnow() + timedelta(minutes=30)
         return conf, token, expiry
 
+    @staticmethod
+    def auth_mode(conf, token):
+        """custom: 커스텀 인증(gds_endpoint 등) → 공유 rclone이 갱신한 값을 읽기만
+        memory: 본인 client_id/secret이 있음 → 플러그인이 메모리에서 직접 갱신 (파일에 쓰지 않음)
+        rclone: rclone 내장 client → rclone에게 갱신을 맡김 (rclone이 rclone.conf에 저장)"""
+        if any("endpoint" in k.lower() for k in conf):
+            return "custom"
+        if conf.get("client_id") and conf.get("client_secret") and token.get("refresh_token"):
+            return "memory"
+        return "rclone"
+
+    def _memory_refresh(self, remote, conf, token):
+        form = urlencode({"client_id": conf["client_id"], "client_secret": conf["client_secret"],
+                          "refresh_token": token["refresh_token"], "grant_type": "refresh_token"}).encode()
+        url = conf.get("token_url") or "https://oauth2.googleapis.com/token"
+        request = Request(url, data=form, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with urlopen(request, timeout=30) as response:
+                data = json.loads(response.read() or b"{}")
+        except HTTPError as error:
+            try:
+                info = json.loads(error.read() or b"{}")
+            except ValueError:
+                info = {}
+            reason = info.get("error_description") or info.get("error") or f"HTTP {error.code}"
+            if info.get("error") == "invalid_grant":
+                reason += " — refresh token이 무효입니다. rclone config reconnect로 다시 인증하세요."
+            raise RuntimeError(f"{remote} 토큰 갱신 실패: {reason}") from None
+        except (URLError, OSError) as error:
+            raise RuntimeError(f"{remote} 토큰 갱신 실패(네트워크): {error}") from None
+        expiry = utcnow() + timedelta(seconds=max(60, int(data.get("expires_in") or 3600) - 60))
+        log.info("[%s] 토큰을 메모리에서 갱신했습니다 (rclone.conf에는 쓰지 않음, 만료 %s)",
+                 remote, expiry.astimezone().strftime("%H:%M"))
+        return data["access_token"], expiry
+
     def token(self, remote, force=False):
-        """rclone.conf에서 토큰을 읽는다. rclone.conf를 FF·호스트 rclone과 공유하는 환경을 전제로,
-        아직 유효하면 그대로 쓰고(파일에 쓰지 않음), 만료가 가까울 때만 rclone에게 갱신을 맡긴다.
-        커스텀 인증 리모트(gds_endpoint 등)는 갱신을 시도하지 않고, 공유 중인 다른 rclone이 갱신해 저장한 토큰을 읽는다."""
+        """rclone.conf는 FF·호스트 rclone과 공유한다는 전제로, 리모트 종류에 따라 토큰을 얻는다 (auth_mode 참고)."""
         self.config_changed()
         cached = self._tokens.get(remote)
         if cached and not force and cached["expiry"] - utcnow() > timedelta(minutes=3):
             return cached
         conf, token, expiry = self._read(remote)
-        custom = [k for k in conf if "endpoint" in k.lower()]
-        fresh = token.get("access_token") and expiry - utcnow() > timedelta(minutes=3)
-        if not custom and (force or not fresh):
+        mode = self.auth_mode(conf, token)
+        access = token.get("access_token")
+        fresh = access and expiry - utcnow() > timedelta(minutes=3)
+        notes = []
+        if mode == "memory" and (force or not fresh):
+            access, expiry = self._memory_refresh(remote, conf, token)
+        elif mode == "custom" and (force or not fresh):
+            # 1) 이 리모트를 마운트해 쓰고 있는 rclone(RC)의 메모리에서 최신 토큰을 빌려 온다
+            borrowed, notes = self._borrow_from_rc(remote)
+            if borrowed:
+                access, expiry = borrowed
+            else:
+                # 2) 이 인증 방식을 지원하는 rclone이면, rclone이 실제로 보내는 토큰을 요청 헤더에서 읽는다.
+                #    (gds 포크처럼 토큰을 서버에서 받아 메모리에서만 쓰고 rclone.conf에 저장하지 않는 경우 대응)
+                header, note = self._token_from_headers(remote)
+                if header:
+                    access, expiry = header, utcnow() + timedelta(minutes=45)
+                else:
+                    notes.append(note)
+                    conf, token, expiry = self._read(remote)  # 혹시 저장하는 방식이면 파일에 새 값이 있음
+                    access = token.get("access_token")
+        elif mode == "rclone" and (force or not fresh):
             self.run("about", f"{remote}:", "--json")  # rclone이 토큰을 갱신해 rclone.conf에 저장
             conf, token, expiry = self._read(remote)
-        if not token.get("access_token") or expiry <= utcnow():
+            access = token.get("access_token")
+        if not access or expiry <= utcnow():
             where = self.config or "rclone 기본 설정 파일"
-            if custom:
+            if mode == "custom":
+                custom = [k for k in conf if "endpoint" in k.lower()]
                 raise RuntimeError(
                     f"{remote} 토큰이 만료된 상태입니다(만료 {token.get('expiry') or '알 수 없음'}, 설정 파일: {where}). "
-                    f"커스텀 인증({', '.join(custom)}) 리모트라 이 플러그인은 갱신하지 않고, 이 rclone.conf를 함께 쓰는 "
-                    "FF·호스트 rclone이 갱신해 저장하기를 기다립니다(파일이 바뀌면 바로 다시 시도). 계속 이 상태면 "
-                    "그쪽에서 이 리모트를 쓰고 있는지 확인하세요.")
+                    f"커스텀 인증({', '.join(custom)}) 리모트입니다. 시도한 것: " + (" / ".join(notes) or "없음") +
+                    ". 이 리모트를 마운트한 rclone의 RC에서 토큰을 읽을 수 있게 하거나(config/get 권한), "
+                    "이 인증 방식을 지원하는 rclone 실행 파일을 지정하세요.")
             raise RuntimeError(f"{remote} 토큰이 만료된 상태입니다(만료 {token.get('expiry') or '알 수 없음'}, 설정 파일: {where}). "
                                "rclone이 이 리모트의 토큰을 갱신하지 못했습니다. rclone.conf 경로와 리모트의 인증 방식을 확인하세요.")
-        self._tokens[remote] = {"access": token["access_token"], "expiry": expiry,
+        self._tokens[remote] = {"access": access, "expiry": expiry, "mode": mode,
                                 "team_drive": str(conf.get("team_drive") or "").strip()}
         return self._tokens[remote]
+
+    def _token_from_headers(self, remote):
+        """rclone about을 --dump auth로 실행해 Google API 요청의 Authorization 헤더에서 access token을 읽는다."""
+        try:
+            command = self.command("about", f"{remote}:", "--json", "--dump", "auth", "-vv")
+            result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            return None, f"rclone 실행 실패: {error}"
+        found = re.findall(r"Authorization:\s*Bearer\s+([A-Za-z0-9._\-]+)", result.stderr)
+        if result.returncode == 0 and found:
+            log.info("[%s] rclone(%s)이 쓰는 토큰을 요청 헤더에서 가져왔습니다 (45분 사용, 파일에는 쓰지 않음)", remote, self.binary)
+            return found[-1], ""
+        tail = [l for l in result.stderr.splitlines() if "ERROR" in l or "Failed" in l or "CRITICAL" in l][-1:]
+        if result.returncode != 0:
+            return None, f"rclone({self.binary})으로 {remote}에 접속하지 못함 — 이 rclone이 이 인증 방식을 지원하지 않을 수 있음" + \
+                (f": {tail[0][-160:]}" if tail else "")
+        return None, "rclone 요청 헤더에서 토큰을 찾지 못함"
+
+    def _borrow_from_rc(self, remote):
+        """마운트 중인 rclone은 토큰을 스스로 갱신해 메모리에 들고 있다. RC의 config/get으로 그 값을 읽는다.
+        (읽기만 하고 rclone.conf에는 쓰지 않는다)"""
+        notes, want = [], f"{remote}:"
+        seen, hosted = set(), False
+        for source in self.rc_sources:
+            rc = source["rc"]
+            if rc in seen:
+                continue
+            seen.add(rc)
+            rule = VfsRule({"local": "/", "rc": rc, "user": source.get("user"), "pass": source.get("pass")})
+            try:
+                fses = rule.call("vfs/list", {}, 15).get("vfses") or []
+            except Exception as error:
+                notes.append(f"{rc} 연결 실패")
+                continue
+            if want not in fses:
+                continue
+            hosted = True
+            try:
+                conf = rule.call("config/get", {"name": remote}, 15)
+            except Exception as error:
+                message = str(error)
+                if "auth" in message.lower():
+                    message = "RC에 인증이 설정돼 있지 않아 config/get을 쓸 수 없음 (--rc-user/--rc-pass 또는 --rc-no-auth 필요)"
+                notes.append(f"{rc}: {message[:160]}")
+                continue
+            try:
+                token = json.loads(conf.get("token") or "{}")
+            except ValueError:
+                token = {}
+            expiry = parse_time(token.get("expiry"))
+            if token.get("access_token") and expiry and expiry - utcnow() > timedelta(minutes=3):
+                log.info("[%s] 토큰을 마운트 중인 rclone(%s)에서 가져왔습니다 (만료 %s, 파일에는 쓰지 않음)",
+                         remote, rc, expiry.astimezone().strftime("%H:%M"))
+                return (token["access_token"], expiry), notes
+            notes.append(f"{rc}: 마운트의 토큰도 만료 상태")
+        if not seen:
+            notes.append("토큰을 빌려 올 RC 없음 (보관함 RC 주소나 VFS 규칙이 없음)")
+        elif not hosted:
+            notes.append(f"{want}를 마운트한 RC를 찾지 못함")
+        return None, notes
+
+    def env_for(self, remote):
+        """rclone을 실행할 때 메모리에서 갱신한 토큰을 환경변수로 넘겨, rclone이 따로 갱신·저장하지 않게 한다."""
+        info = self._tokens.get(remote)
+        if not info or info.get("mode") not in ("memory", "custom") or not re.fullmatch(r"[A-Za-z0-9_]+", remote):
+            return None
+        conf, token, _ = self._read(remote)
+        token = dict(token, access_token=info["access"], expiry=info["expiry"].isoformat())
+        env = dict(os.environ)
+        env[f"RCLONE_CONFIG_{remote.upper()}_TOKEN"] = json.dumps(token)
+        return env
 
 
 class DriveApi:
@@ -399,6 +579,7 @@ def build_event(prev, cur):
 
 class Watcher:
     def __init__(self, cfg, store, rclone, extensions, buffer_seconds, api_timeout):
+        self.cfg = dict(cfg)
         self.name = cfg["name"]
         self.source_remote = str(cfg["source_remote"]).rstrip(":")
         self.root_id = cfg["root_id"]
@@ -411,13 +592,15 @@ class Watcher:
         self.retry_at = 0.0
         self.failures = 0
         self.root_checked = False
+        self.drive_id = ""
+        self.user_feed = False  # 공유 드라이브 멤버가 아니면 계정 전체 변경 목록으로 감시
         self.verbose = False
         self.reset_stat()
         if not self.local_root:
             raise ValueError(f"{self.name}: local_root는 절대 경로여야 합니다.")
 
     def reset_stat(self):
-        self.stat = {"raw": 0, "outside": 0, "ext": 0, "same": 0, "events": 0, "note": ""}
+        self.stat = {"raw": 0, "outside": 0, "ext": 0, "same": 0, "events": 0, "note": "", "seed": ""}
 
     def trace(self, message, *args):
         """자세한 로그를 켜면 변경 하나하나를 어떻게 처리했는지 남긴다."""
@@ -452,14 +635,9 @@ class Watcher:
             data = self.api.file(self.root_id) or {}
         elif data.get("mimeType") != FOLDER_MIME:
             raise RuntimeError("감시 폴더 ID가 폴더가 아닙니다.")
-        team_drive = self.api.team_drive
-        # team_drive 리모트는 driveId로 그 공유 드라이브의 변경만 받는다. (내 드라이브 리모트는
-        # includeItemsFromAllDrives로 참여 중인 공유 드라이브 변경까지 받으므로 제한 없음)
-        if self.mode == "changes" and team_drive and (data.get("driveId") or "") != team_drive:
-            where = f"공유 드라이브 {data['driveId']}" if data.get("driveId") else "내 드라이브"
-            mine = f"공유 드라이브 {team_drive}" if team_drive else "내 드라이브"
-            raise RuntimeError(f"감시 폴더(실제 위치: {where})가 리모트 {self.source_remote}의 드라이브({mine})와 달라 "
-                               "Changes로 변경을 받을 수 없습니다. 그 드라이브를 가리키는 리모트를 지정하거나 Activity 방식을 쓰세요.")
+        # 변경 목록은 리모트의 기본 드라이브(team_drive)가 아니라 감시 폴더가 실제로 있는 드라이브 기준으로 받는다.
+        # 토큰은 계정 단위라 같은 토큰으로 다른 공유 드라이브의 변경도 조회할 수 있다 (그 드라이브에 접근 권한만 있으면 됨).
+        self.drive_id = "" if self.user_feed else (data.get("driveId") or "")
         self.root_checked = True
 
     @staticmethod
@@ -511,71 +689,98 @@ class Watcher:
         수집하는 동안 이 폴더의 변경은 Drive 쪽에 쌓여 있다가, 끝나면 이어서 처리된다(다른 폴더는 계속 감시)."""
         self.stat["note"] = "감시 시작 (이 시점 이후의 변경부터 감지)"
         if self.seed:
-            self.store.save_cursor(self.name, token, "seeding")
+            # 목록 수집은 백그라운드에서, 변경 감지는 바로 시작한다
+            self.store.save_cursor(self.name, token)
+            self.store.set_seed(self.name, True)
             self.launch_seed()
         else:
             self.store.save_cursor(self.name, token)
             log.info("[%s] 감시 시작 (기존 파일 목록 수집 안 함)", self.name)
 
     def seeding(self, status):
-        """seeding 상태면 True (워커가 재시작돼 수집이 끊겼으면 다시 시작)."""
-        if status != "seeding":
+        """기존 파일 목록을 수집 중이면 진행 상황을 표시한다. 변경 감지는 막지 않는다 (항상 False 반환).
+        워커가 재시작돼 수집이 끊겼으면 다시 시작한다."""
+        if status == "seeding":  # 이전 버전 형식
+            self.store.save_cursor(self.name, self.store.get_cursor(self.name)[0])
+            self.store.set_seed(self.name, True)
+        if not self.store.seed_pending(self.name):
             return False
         info = SEEDERS.get(self.name)
         if not info or not info["thread"].is_alive():
             self.launch_seed()
             info = SEEDERS.get(self.name)
         minutes = int((time.time() - info["started"]) / 60)
-        self.stat["note"] = f"기존 파일 목록 수집 중 ({minutes}분 경과, 이 폴더의 변경은 끝난 뒤 처리)"
+        self.stat["seed"] = (f"기존 목록 수집 중 {info.get('count', 0):,}개 · 폴더 {info.get('folders', 0):,}개 · {minutes}분")
         if time.time() - info.get("logged", 0) >= 300:
             info["logged"] = time.time()
             if minutes:
-                log.info("[%s] 기존 파일 목록 수집 중… %d분 경과", self.name, minutes)
-        return True
+                log.info("[%s] 기존 파일 목록 수집 중… %d개, %d분 경과", self.name, info.get("count", 0), minutes)
+        return False
 
     def launch_seed(self):
+        """기존 파일 목록을 Drive API로 직접 모은다 (폴더 50개씩 묶어 조회).
+        rclone을 거치지 않으므로 gds 포크처럼 루트를 서버에서 정하는 리모트에서도 감시 폴더 기준 경로가 정확하고,
+        진행 상황(모은 개수)을 화면에 보여 줄 수 있다."""
         info = SEEDERS.get(self.name)
         if info and info["thread"].is_alive():
             return
-        info = {"proc": None, "started": time.time()}
-        command = self.rclone.command("lsjson", "-R", "--fast-list", "--no-mimetype", "--no-modtime",
-                                      "--drive-root-folder-id", self.root_id, f"{self.source_remote}:")
-        name, local_root, store_path = self.name, self.local_root, self.store.path
+        info = {"proc": None, "started": time.time(), "count": 0, "folders": 0}
+        name, local_root, store_path, root_id = self.name, self.local_root, self.store.path, self.root_id
+        api, drive_id = self.api, getattr(self, "drive_id", "")
+        scope = {"corpora": "drive", "driveId": drive_id} if drive_id else {"corpora": "allDrives"}
 
         def run():
             store = Store(store_path)
             try:
-                log.info("[%s] 기존 파일 목록 수집 시작 (rclone lsjson, 폴더가 크면 오래 걸림)", name)
-                proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                info["proc"] = proc
-                out, err = proc.communicate(timeout=6 * 3600)
+                log.info("[%s] 기존 파일 목록 수집 시작 (Drive API, 폴더가 크면 오래 걸림)", name)
+                rows, queue, seen = [], [(root_id, local_root)], {root_id}
+                while queue and not STOP:
+                    batch, queue = queue[:50], queue[50:]
+                    parents = dict(batch)
+                    q = "(" + " or ".join(f"'{fid}' in parents" for fid in parents) + ") and trashed = false"
+                    page = None
+                    while not STOP:
+                        params = dict(scope, q=q, pageSize=1000, includeItemsFromAllDrives="true",
+                                      fields="nextPageToken,files(id,name,mimeType,parents,shortcutDetails(targetId,targetMimeType))")
+                        if page:
+                            params["pageToken"] = page
+                        data = api.get("files", **params)
+                        for f in data.get("files") or []:
+                            parent = next((p for p in f.get("parents") or [] if p in parents), None)
+                            if not parent or not f.get("name"):
+                                continue
+                            path = posixpath.join(parents[parent], f["name"].replace("/", "／"))
+                            mime = f.get("mimeType")
+                            target = (f.get("shortcutDetails") or {})
+                            if mime == SHORTCUT_MIME and target.get("targetMimeType") == FOLDER_MIME:
+                                rows.append((f["id"], path, True, f"shortcut:{target['targetId']}"))
+                                rows.append((target["targetId"], path, True, f"target:{f['id']}"))
+                                if target["targetId"] not in seen:
+                                    seen.add(target["targetId"])
+                                    queue.append((target["targetId"], path))
+                            elif mime == FOLDER_MIME:
+                                rows.append((f["id"], path, True))
+                                if f["id"] not in seen:
+                                    seen.add(f["id"])
+                                    queue.append((f["id"], path))
+                            elif mime != SHORTCUT_MIME:
+                                rows.append((f["id"], path, False))
+                        info["count"] = len(rows)
+                        page = data.get("nextPageToken")
+                        if not page:
+                            break
+                    info["folders"] += len(batch)
                 if STOP:
                     return
-                if proc.returncode != 0:
-                    raise RuntimeError(f"rclone lsjson 실패(코드 {proc.returncode}): {err.strip()[-400:]}")
-                rows = []
-                for e in json.loads(out or "[]"):
-                    if not e.get("ID"):
-                        continue
-                    path = posixpath.join(local_root, e["Path"])
-                    ids = str(e["ID"]).split("\t")  # rclone은 바로가기를 '대상ID<TAB>바로가기ID'로 표기
-                    if len(ids) == 2 and e.get("IsDir"):
-                        rows.append((ids[1], path, True, f"shortcut:{ids[0]}"))
-                        rows.append((ids[0], path, True, f"target:{ids[1]}"))
-                    else:
-                        rows.append((ids[0], path, e.get("IsDir", False)))
-                store.replace_items(name, rows)
-                token, _ = store.get_cursor(name)
-                store.save_cursor(name, token, "ready")
-                log.info("[%s] 기존 파일 %d개 수집 완료 (%.0f분 소요) → 쌓인 변경부터 처리합니다",
-                         name, len(rows), (time.time() - info["started"]) / 60)
+                store.merge_items(name, rows)
+                store.set_seed(name, False)
+                log.info("[%s] 기존 파일 %d개(폴더 %d개) 수집 완료 (%.0f분 소요)",
+                         name, len(rows), info["folders"], (time.time() - info["started"]) / 60)
             except Exception as error:
                 if STOP:
                     return
-                token, _ = store.get_cursor(name)
-                store.save_cursor(name, token, "error",
-                                  f"기존 파일 목록 수집 실패, 목록 없이 감시를 계속합니다: {error}")
-                log.error("[%s] 기존 파일 목록 수집 실패, 목록 없이 계속: %s", name, error)
+                store.set_seed(name, False)
+                log.error("[%s] 기존 파일 목록 수집 실패, 목록 없이 계속 감시합니다: %s", name, error)
             finally:
                 store.db.close()
 
@@ -593,7 +798,12 @@ class Watcher:
             self.stat["ext"] += 1
             self.trace("확장자 제외: %s", event["path"] or event["removed_path"])
             event = None
+        elif screen_event(event) is None:
+            self.stat["ext"] += 1
+            self.trace("무시 패턴: %s", event["path"] or event["removed_path"])
+            event = None
         else:
+            event = screen_event(event)
             self.stat["events"] += 1
         self.store.record(self.name, file_id, prev, cur, event, self.buffer_seconds, receipt)
         if event:
@@ -607,14 +817,29 @@ class ChangesWatcher(Watcher):
 
     def poll(self):
         token, status = self.store.get_cursor(self.name)
-        if status == "blocked" or self.seeding(status):
+        if status == "blocked":
             return 0
         self.check_root()
-        drive_params = {"driveId": self.api.team_drive} if self.api.team_drive else {}
+        self.seeding(status)
+        drive_params = {"driveId": self.drive_id} if self.drive_id else {}
+        # 체크포인트는 어느 변경 목록(드라이브)의 것인지 함께 저장한다: "드라이브ID|토큰"
+        saved_drive, _, raw = token.rpartition("|") if "|" in token else (None, "", token)
+        if saved_drive is None:  # 이전 버전 형식: 리모트의 team_drive 기준이었음
+            saved_drive = self.api.team_drive
         if not token:
             # 토큰을 먼저 받고 스냅샷 → 그 사이 변경은 스냅샷 뒤에 재생되어 흡수된다
-            self.begin(self.api.get("changes/startPageToken", **drive_params)["startPageToken"])
+            start = self.api.get("changes/startPageToken", **drive_params)["startPageToken"]
+            self.begin(f"{self.drive_id}|{start}")
             return 0
+        if saved_drive != self.drive_id:
+            start = self.api.get("changes/startPageToken", **drive_params)["startPageToken"]
+            self.store.save_cursor(self.name, f"{self.drive_id}|{start}")
+            log.info("[%s] 변경 목록 기준을 %s로 바꿨습니다 (이 시점 이후 변경부터 감지)", self.name,
+                     f"공유 드라이브 {self.drive_id}" if self.drive_id else "계정 전체")
+            self.stat["note"] = "변경 목록 기준 전환 (이후 변경부터 감지)"
+            return 0
+        token = raw
+        prefix = f"{self.drive_id}|"
         accepted = 0
         while token and not STOP:
             data = self.api.get(
@@ -625,9 +850,9 @@ class ChangesWatcher(Watcher):
                 accepted += self.handle(change)
             if data.get("nextPageToken"):
                 token = data["nextPageToken"]
-                self.store.save_cursor(self.name, token)
+                self.store.save_cursor(self.name, prefix + token)
                 continue
-            self.store.save_cursor(self.name, data.get("newStartPageToken") or token)
+            self.store.save_cursor(self.name, prefix + (data.get("newStartPageToken") or token))
             break
         return accepted
 
@@ -681,9 +906,10 @@ class ActivityWatcher(Watcher):
 
     def poll(self):
         token, status = self.store.get_cursor(self.name)
-        if status == "blocked" or self.seeding(status):
+        if status == "blocked":
             return 0
         self.check_root()
+        self.seeding(status)
         if not token:
             now = stamp(utcnow())
             self.begin(json.dumps({"start": now, "floor": now}))
@@ -899,6 +1125,8 @@ class LocalWatcher(Watcher):
 
     # ── 공통 ──
     def included(self, rel, is_dir):
+        if ignored(self.abs(rel)):
+            return False
         parts = rel.split("/")
         for part in parts[:-1] if not is_dir else parts:
             if part in LOCAL_IGNORE or (part.startswith(".") and part != ".bookoasisignore"):
@@ -1213,6 +1441,12 @@ class VfsRule:
         self.rc = str(cfg["rc"]).rstrip("/")
         if "://" not in self.rc:
             self.rc = "http://" + self.rc
+        # gd-poller처럼 http://user:pass@host:5572 형식도 받는다
+        from urllib.parse import unquote, urlsplit, urlunsplit
+        parts = urlsplit(self.rc)
+        if parts.username:
+            cfg = dict(cfg, user=cfg.get("user") or unquote(parts.username), **{"pass": cfg.get("pass") or unquote(parts.password or "")})
+            self.rc = urlunsplit((parts.scheme, parts.hostname + (f":{parts.port}" if parts.port else ""), parts.path, "", ""))
         self.fs = str(cfg.get("fs") or "").strip()
         if self.fs and not self.fs.endswith(":"):
             self.fs += ":"
@@ -1334,6 +1568,18 @@ class Vfs:
         return errors
 
 
+def rc_sources(vfs_rules, libraries):
+    """토큰을 빌려 올 수 있는 rclone RC 후보: 직접 지정한 VFS 규칙 + 보관함에 설정된 RC 주소."""
+    out = []
+    for rule in vfs_rules or []:
+        if rule.get("rc"):
+            out.append({"rc": rule["rc"], "user": rule.get("user"), "pass": rule.get("pass")})
+    for lib in libraries or []:
+        if lib.get("rclone_rc_url"):
+            out.append({"rc": lib["rclone_rc_url"]})
+    return out
+
+
 # ─────────────────────────── BookOasis 스캔 ───────────────────────────
 
 class BookOasis:
@@ -1403,13 +1649,21 @@ class BookOasis:
 
         # 1) VFS: 이전 경로 forget → 부모 디렉터리 refresh (비재귀), 마운트별로 묶어서 전송
         forgets, refreshes, owners = {}, {}, {}
+        # 같은 폴더에서 파일이 여러 개 지워지면 파일마다 forget하지 않고 그 폴더를 한 번 forget
+        deleted_in = {}
+        for ev in events:
+            if ev["action"] == "delete" and ev["item_type"] == "file" and ev["removed_path"]:
+                deleted_in.setdefault(posixpath.dirname(ev["removed_path"]), []).append(ev["id"])
+        collapse = {d for d, ids in deleted_in.items() if len(ids) > 1}
         for ev in events:
             if ev.get("root") in getattr(self, "skip_vfs", ()):
                 continue
             is_dir = ev["item_type"] == "directory"
             path, removed = ev["path"], ev["removed_path"]
             ops = []
-            if ev["action"] in ("rename", "move", "delete") and removed:
+            if ev["action"] == "delete" and not is_dir and posixpath.dirname(removed) in collapse:
+                ops.append(("forget", posixpath.dirname(removed), True))
+            elif ev["action"] in ("rename", "move", "delete") and removed:
                 ops.append(("forget", removed, is_dir))
             for p in (removed, path):
                 if p:
@@ -1501,6 +1755,82 @@ class BookOasis:
         return final
 
 
+# ─────────────────────────── 디스코드 알림 ───────────────────────────
+
+class Notifier:
+    """처리 결과를 디스코드 웹훅으로 알린다. 감지 시점이 아니라 '반영됨/실패'가 정해진 뒤, 처리 묶음마다 한 번."""
+    ICON = {"create": "➕", "edit": "✏️", "rename": "↪️", "move": "↪️", "delete": "🗑️"}
+
+    def __init__(self, cfg):
+        self.url = str(cfg.get("discord_webhook") or "").strip()
+        self.on_done = bool(cfg.get("notify_done", True))
+        self.on_failed = bool(cfg.get("notify_failed", True))
+        self.on_error = bool(cfg.get("notify_error", True))
+        self.sent_errors = {}
+
+    @property
+    def enabled(self):
+        return self.url.startswith("https://")
+
+    def post(self, embeds):
+        if not self.enabled or not embeds:
+            return None
+        body = json.dumps({"username": "드라이브 변경 감시", "embeds": embeds[:10]}).encode()
+        request = Request(self.url, data=body, headers={"Content-Type": "application/json", "User-Agent": "gdrive_watch"})
+        try:
+            with urlopen(request, timeout=15) as response:
+                return response.status
+        except HTTPError as error:
+            log.warning("디스코드 알림 실패: HTTP %s", error.code)
+            return error.code
+        except (URLError, OSError) as error:
+            log.warning("디스코드 알림 실패: %s", error)
+            return 0
+
+    @staticmethod
+    def _line(ev, extra=""):
+        path = ev["path"] or ev["removed_path"]
+        name = posixpath.basename(path.rstrip("/")) or path
+        parent = posixpath.basename(posixpath.dirname(path.rstrip("/")))
+        icon = Notifier.ICON.get(ev["action"], "•")
+        return f"{icon} **{name}**{'/' if ev['item_type'] == 'directory' else ''} · {parent}{extra}"[:300]
+
+    def results(self, events, results):
+        if not self.enabled:
+            return
+        done = [ev for ev in events if results[ev["id"]]["status"] == "done"]
+        failed = [ev for ev in events if results[ev["id"]]["status"] == "failed"]
+        embeds = []
+        if self.on_done and done:
+            libs = sorted({s["library"] for ev in done for s in results[ev["id"]]["scans"] if s.get("ok") and s.get("library")})
+            lines = [self._line(ev) for ev in done[:15]] + ([f"… 외 {len(done) - 15}건"] if len(done) > 15 else [])
+            embeds.append({"title": f"반영됨 {len(done)}건", "color": 5763719, "description": "\n".join(lines)[:3900],
+                           "footer": {"text": ", ".join(libs)[:200]} if libs else None})
+        if self.on_failed and failed:
+            lines = [self._line(ev, f"\n　└ {results[ev['id']]['message'][:160]}") for ev in failed[:10]]
+            lines += [f"… 외 {len(failed) - 10}건"] if len(failed) > 10 else []
+            embeds.append({"title": f"실패 {len(failed)}건 (재시도 예정이거나 확인 필요)", "color": 15548997,
+                           "description": "\n".join(lines)[:3900]})
+        for embed in embeds:
+            if embed.get("footer") is None:
+                embed.pop("footer", None)
+        self.post(embeds)
+
+    def root_error(self, name, message):
+        """감시 폴더 오류는 같은 내용이면 한 번만 알린다."""
+        if not self.enabled or not self.on_error:
+            return
+        key = message[:120]
+        if self.sent_errors.get(name) == key:
+            return
+        self.sent_errors[name] = key
+        self.post([{"title": f"감시 오류: {name}", "color": 16776960, "description": message[:1500]}])
+
+    def root_ok(self, name):
+        if self.sent_errors.pop(name, None) and self.enabled and self.on_error:
+            self.post([{"title": f"감시 복구: {name}", "color": 3447003, "description": "정상적으로 다시 확인하고 있습니다."}])
+
+
 # ─────────────────────────── 워커 본체 ───────────────────────────
 
 class Worker:
@@ -1510,6 +1840,7 @@ class Worker:
         self.store = Store(os.path.join(data_dir, "state.db"))
         self.runtime_mtime = 0
         self.watchers, self.target, self.rclone, self.locals = [], None, None, []
+        self.notifier = Notifier({})
         self.cfg = {}
         self.state = {"pid": os.getpid(), "started": datetime.now().isoformat(timespec="seconds"),
                       "activity": "시작 중", "last_poll": "", "last_process": "", "error": ""}
@@ -1544,6 +1875,14 @@ class Worker:
                                for e in re.split(r"[\s,]+", ext.lower()) if e)
         else:
             extensions = tuple(DEFAULT_EXTENSIONS)
+        global IGNORE
+        patterns = cfg.get("ignore_patterns")
+        try:
+            IGNORE = compile_patterns(DEFAULT_IGNORE_PATTERNS if patterns is None else patterns)
+        except re.error as error:
+            log.error("무시 패턴 오류, 기본값 사용: %s", error)
+            IGNORE = compile_patterns(DEFAULT_IGNORE_PATTERNS)
+        self.notifier = Notifier(cfg)
         buffer_seconds = int(cfg.get("buffer_seconds", 60))
         for old in getattr(self, "locals", []):
             old.stop()
@@ -1560,8 +1899,11 @@ class Worker:
                     log.error("[%s] 로컬 감시 설정 오류: %s", root.get("name"), error)
                 continue
             try:
-                cls = ActivityWatcher if root.get("mode") == "activity" else ChangesWatcher
+                fallback = self.fallbacks().get(root.get("name"))
+                activity = root.get("mode") == "activity" and fallback != "changes"
+                cls = ActivityWatcher if activity else ChangesWatcher
                 watcher = cls(root, self.store, rclone, extensions, buffer_seconds, int(cfg.get("api_timeout", 60)))
+                watcher.user_feed = fallback == "userfeed"
                 watcher.verbose = bool(cfg.get("verbose_log"))
                 watchers.append(watcher)
             except Exception as error:
@@ -1571,11 +1913,47 @@ class Worker:
         self.rclone = rclone
         rclone.config_changed()  # 기준 상태 기록
         log.info("rclone 설정 파일: %s", rclone.config_path() or "(확인 실패)")
+        rclone.rc_sources = rc_sources(cfg.get("vfs"), cfg.get("libraries"))
         self.target = BookOasis(cfg, cfg.get("libraries"), cfg.get("vfs"), self.store)
         self.target.skip_vfs = {w.name for w in locals_}  # 로컬 폴더는 이미 파일을 보고 감지했으므로 VFS 새로고침 불필요
         log.info("설정 적용: Drive 감시 %d개, 로컬 감시 %d개, 보관함 경로 %d개, VFS 규칙 %d개",
                  len(self.watchers), len(locals_), len(self.target.libraries), len(self.target.vfs.rules))
         return not first
+
+    def fallbacks(self):
+        try:
+            with open(os.path.join(self.data_dir, "fallback.json"), encoding="utf-8") as handle:
+                return json.load(handle) or {}
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def scope_missing(error):
+        text = str(error).lower()
+        return any(k in text for k in ("insufficient", "scope", "has not been used", "is disabled", "access_token_scope"))
+
+    def set_fallback(self, name, value):
+        data = self.fallbacks()
+        data[name] = value
+        path = os.path.join(self.data_dir, "fallback.json")
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+
+    def fall_back(self, watcher):
+        """Activity → Changes 자동 전환. 전환 사실은 fallback.json에 남겨 재시작 후에도 유지한다."""
+        self.set_fallback(watcher.name, "changes")
+        with self.store.db:  # Activity 체크포인트는 Changes에서 쓸 수 없으므로 비운다 (추적 목록은 그대로 사용)
+            self.store.db.execute("DELETE FROM cursor WHERE root=?", (watcher.name,))
+        cfg = dict(watcher.cfg, mode="changes", seed=False)
+        replacement = ChangesWatcher(cfg, self.store, watcher.rclone, watcher.extensions, watcher.buffer_seconds,
+                                     watcher.api.timeout)
+        replacement.verbose = watcher.verbose
+        self.watchers[self.watchers.index(watcher)] = replacement
+        message = (f"[{watcher.name}] 토큰에 Drive Activity 권한(drive.activity.readonly)이 없어 Changes 방식으로 "
+                   "자동 전환했습니다. 이 시점 이후의 변경부터 감지합니다.")
+        log.warning(message)
+        self.notifier.root_error(watcher.name, message)
 
     def collect(self):
         started = time.monotonic()
@@ -1587,6 +1965,9 @@ class Worker:
             if time.monotonic() < watcher.retry_at:
                 lines.append(f"{watcher.name}: 호출 제한으로 대기 중 ({int(watcher.retry_at - time.monotonic())}초 남음)")
                 continue
+            row = self.store.db.execute("SELECT status, error FROM cursor WHERE root=?", (watcher.name,)).fetchone()
+            if row and row["status"] == "blocked" and "membership" in (row["error"] or "").lower():
+                self.store.set_error(watcher.name, row["error"], "error")  # 이전 버전에서 멈춘 폴더: 자동 전환으로 다시 시도
             self.activity(f"[{watcher.name}] 변경 확인 중")
             one = time.monotonic()
             try:
@@ -1600,6 +1981,21 @@ class Worker:
                     watcher.retry_at = time.monotonic() + delay
                     watcher.stat["note"] = f"호출 제한, {delay}초 후 재시도"
                     self.store.set_error(watcher.name, watcher.stat["note"])
+                elif error.code == 403 and isinstance(watcher, ChangesWatcher) and "membership" in str(error).lower() \
+                        and not watcher.user_feed:
+                    # 공유 드라이브 멤버가 아니라 폴더만 공유받은 계정: 드라이브 단위 변경 목록 대신 계정 전체 변경 목록을 쓴다
+                    self.set_fallback(watcher.name, "userfeed")
+                    watcher.user_feed, watcher.root_checked = True, False
+                    message = (f"[{watcher.name}] 이 계정은 공유 드라이브 멤버가 아니라 드라이브 단위 변경 목록을 받을 수 없어, "
+                               "계정 전체 변경 목록으로 전환했습니다. 이 시점 이후의 변경부터 감지합니다.")
+                    log.warning(message)
+                    lines.append(f"{watcher.name}: 공유 드라이브 멤버 아님 → 계정 전체 변경 목록으로 전환")
+                    continue
+                elif error.code == 403 and isinstance(watcher, ActivityWatcher) and self.scope_missing(error):
+                    # 토큰에 drive.activity.readonly가 없으면 Activity를 쓸 수 없다 → 같은 폴더를 Changes로 감시
+                    self.fall_back(watcher)
+                    lines.append(f"{watcher.name}: Activity 권한 없음 → Changes로 전환")
+                    continue
                 elif error.code == 403:
                     watcher.stat["note"] = "권한 오류로 감시 중지 (처음부터 누르면 재시도)"
                     self.store.set_error(watcher.name, str(error), "blocked")
@@ -1613,11 +2009,25 @@ class Worker:
                 self.store.set_error(watcher.name, str(error))
                 log.exception("[%s] 확인 실패: %s", watcher.name, error)
                 lines.append(f"{watcher.name}: 오류 - {str(error)[:160]}")
+            if watcher.stat.get("seed") and not watcher.stat.get("note"):
+                counts = watcher.summary().split(": ", 1)[-1]
+                watcher.stat["note"] = f"{counts} · {watcher.stat['seed']}"
+                lines[-1] = f"{watcher.name}: {watcher.stat['note']}"
+            note = watcher.stat.get("note") or ""
+            if note.startswith(("오류", "권한 오류")):
+                self.notifier.root_error(watcher.name, note)
+            elif not note.startswith("호출 제한"):
+                self.notifier.root_ok(watcher.name)
             try:
                 self.store.save_stat(watcher.name, watcher.stat, time.monotonic() - one)
             except sqlite3.Error:
                 pass
         lines += [local.last if local.last.startswith(local.name) else f"{local.name}: {local.last}" for local in self.locals]
+        for local in self.locals:
+            if local.last.startswith(("오류", "확인 필요")) or ": 오류" in local.last or "확인 필요" in local.last:
+                self.notifier.root_error(local.name, local.last)
+            elif local.snapshot is not None:
+                self.notifier.root_ok(local.name)
         self.state["last_poll"] = datetime.now().isoformat(timespec="seconds")
         row = self.store.db.execute("SELECT COUNT(*), MIN(ready_at) FROM event WHERE status='pending'").fetchone()
         if row and row[0]:
@@ -1639,7 +2049,13 @@ class Worker:
             results = {ev["id"]: {"status": "failed", "message": str(error), "vfs": [], "scans": []} for ev in events}
         max_attempts = int(self.cfg.get("max_attempts", 5))
         for ev in events:
-            r = results.get(ev["id"]) or {"status": "failed", "message": "결과 없음", "vfs": [], "scans": []}
+            results.setdefault(ev["id"], {"status": "failed", "message": "결과 없음", "vfs": [], "scans": []})
+        try:
+            self.notifier.results(events, results)
+        except Exception as error:
+            log.warning("알림 처리 오류: %s", error)
+        for ev in events:
+            r = results[ev["id"]]
             status = self.store.finish(ev, r["status"], r["message"], {"vfs": r["vfs"], "scans": r["scans"]},
                                        1 if r.get("terminal") else max_attempts)
             if r["status"] == "failed":

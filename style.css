@@ -176,3 +176,13 @@
 .gdw-row.root.is-local { grid-template-columns: 1fr 7.5rem 9rem 6rem 3fr 0 auto auto auto; }
 
 .gdw-rclone .dim { color: var(--app-text-muted); }
+
+.gdw-textarea { width: 100%; max-width: 760px; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem;
+    background: var(--app-input-bg); color: var(--app-text-primary); border: 1px solid var(--app-border); border-radius: 6px; padding: 0.5rem 0.6rem; resize: vertical; }
+
+.gdw-ev-path .root { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.gdw-lib { display: inline-block; font-size: 0.74rem; padding: 0 0.45rem; border-radius: 999px; border: 1px solid var(--app-border);
+    color: var(--app-text-secondary); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.gdw-lib.ok { border-color: var(--gdw-ok); color: var(--gdw-ok); }
+.gdw-lib.ok::before { content: "→ "; }
+.gdw-lib.fail { border-color: var(--gdw-fail); color: var(--gdw-fail); }

@@ -97,11 +97,11 @@
         (d.roots || []).forEach(function (r) {
             var cls = r.status === 'ready' ? 'ok' : (r.status === 'error' || r.status === 'blocked') ? 'fail' : 'wait';
             var label = !r.enabled ? '꺼짐' : r.status === 'ready' ? '정상' : r.status === 'blocked' ? '확인 필요로 중지' :
-                r.status === 'error' ? '오류' : r.status === 'seeding' ? '기존 파일 목록 수집 중' : '첫 확인 대기';
+                r.status === 'error' ? '오류' : r.status === 'seeding' ? '정상' : '첫 확인 대기';
             var since = r.status === 'seeding' && r.updated ? Math.max(0, Math.round((Date.now() - new Date(r.updated).getTime()) / 60000)) : null;
             tbody.appendChild(el('tr', {}, [
                 el('td', {}, [el('strong', { text: r.name }), el('small', { text: r.local_root })]),
-                el('td', { text: r.mode === 'activity' ? 'Drive · Activity' : r.mode === 'local' ? '로컬' + (r.local_detect === 'polling' ? ' · 주기' : r.local_detect === 'inotify' ? ' · 실시간' : '') : 'Drive · Changes' }),
+                el('td', { text: r.fallback === 'userfeed' ? 'Drive · Changes (계정 전체 변경 목록)' : r.mode === 'activity' ? (r.fallback ? 'Drive · Changes (Activity 권한 없어 자동 전환)' : 'Drive · Activity') : r.mode === 'local' ? '로컬' + (r.local_detect === 'polling' ? ' · 주기' : r.local_detect === 'inotify' ? ' · 실시간' : '') : 'Drive · Changes' }),
                 el('td', {}, [el('span', { class: 'gdw-tag ' + cls, text: label }),
                     r.error ? el('small', { class: 'gdw-err', text: r.error }) : null,
                     since !== null ? el('small', { text: shortTime(r.updated) + ' 시작, ' + since + '분 경과 · 끝나면 쌓인 변경부터 처리' }) : null,
@@ -176,7 +176,7 @@
                 el('div', { class: 'gdw-ev-path' }, [
                     el('div', { text: path + (ev.item_type === 'directory' ? '/' : ''), title: path }),
                     ev.action !== 'delete' && moved ? el('div', { class: 'from', text: ev.removed_path, title: ev.removed_path }) : null,
-                    el('div', { class: 'root', text: ev.root })
+                    el('div', { class: 'root' }, [ev.root].concat(libraryTags(ev)))
                 ]),
                 pipe
             ]);
@@ -195,6 +195,23 @@
         $('[data-act="prev"]').disabled = st.page <= 1;
         $('[data-act="next"]').disabled = st.page >= pages;
     }
+    var DB_LABEL = { general: '일반', adult: '성인', audiobook: '오디오북', video: '영상' };
+    function libraryName(label) {
+        // 'general#36 네이버 웹툰(ZEEPS)' → '[일반] 네이버 웹툰(ZEEPS)'
+        var m = /^(\w+)#\d+\s+(.*)$/.exec(label || '');
+        return m ? '[' + (DB_LABEL[m[1]] || m[1]) + '] ' + m[2] : (label || '');
+    }
+    function libraryTags(ev) {
+        var seen = {}, tags = [];
+        ((ev.result && ev.result.scans) || []).forEach(function (x) {
+            if (!x.library || seen[x.library]) return;
+            seen[x.library] = 1;
+            var cls = x.ok === true ? 'ok' : x.ok === false ? 'fail' : '';
+            tags.push(el('span', { class: 'gdw-lib ' + cls, text: libraryName(x.library),
+                title: (x.ok === true ? '반영된 보관함' : x.ok === false ? '스캔 실패한 보관함' : '보관함') + ' · 스캔한 폴더: ' + x.dir }));
+        });
+        return tags;
+    }
     function detail(ev) {
         var r = ev.result || {};
         var box = el('div', { class: 'gdw-ev-detail' });
@@ -211,7 +228,7 @@
         var s = el('ul');
         (r.scans || []).forEach(function (x) {
             var cls = x.ok === true ? 'ok' : x.ok === false ? 'fail' : '';
-            s.appendChild(el('li', { class: cls, text: x.dir + (x.library ? '  [' + x.library + '] ' : ' ') + (x.msg || '') }));
+            s.appendChild(el('li', { class: cls, text: (x.library ? libraryName(x.library) + ' ← ' : '') + x.dir + (x.msg ? '  ' + x.msg : '') }));
         });
         if (!(r.scans || []).length) s.appendChild(el('li', { text: ev.status === 'pending' ? '처리 전' : 'VFS 실패로 스캔 보류' }));
         box.appendChild(s);
@@ -223,6 +240,7 @@
     function loadSetup() {
         rpc('get_watch').then(function (d) {
             st.watch = d.watch;
+            st.defaultIgnore = d.default_ignore || [];
             var s = d.settings || {};
             $$('[data-env]').forEach(function (i) {
                 var k = i.getAttribute('data-env');
@@ -264,11 +282,28 @@
                 var expired = exp && !isNaN(exp) && exp < new Date();
                 tbody.appendChild(el('tr', {}, [
                     el('td', { text: x.name }),
-                    el('td', { class: expired ? 'bad' : '', text: x.expiry ? (expired ? '만료됨 ' : '') + String(x.expiry).slice(0, 19).replace('T', ' ') : '토큰 없음' }),
-                    el('td', { text: (x.team_drive ? '공유 드라이브' : '내 드라이브') + (x.custom_auth ? ' · 커스텀 인증' : '') }),
+                    x.auth_mode === 'custom'
+                        ? el('td', { class: 'dim', text: '파일 값 사용 안 함', title: 'rclone.conf에 적힌 만료 ' + String(x.expiry || '-').slice(0, 19).replace('T', ' ') +
+                            ' — 이 리모트는 토큰을 인증 서버에서 받아 메모리에서만 쓰므로 파일의 시각은 바뀌지 않는 게 정상입니다. 실제 상태는 [토큰 가져오기 시험]으로 확인하세요.' })
+                        : el('td', { class: expired ? 'bad' : '', text: x.expiry ? (expired ? '만료됨 ' : '') + String(x.expiry).slice(0, 19).replace('T', ' ') : '토큰 없음' }),
+                    el('td', { text: (x.team_drive ? '공유 드라이브' : '내 드라이브') + ' · ' +
+                        ({ memory: '메모리 갱신(파일 안 씀)', custom: '커스텀 인증 · rclone이 쓰는 토큰을 가져옴', rclone: 'rclone이 갱신' }[x.auth_mode] || '') }),
                     el('td', { class: /activity/.test(x.granted || '') ? '' : (/확인 불가|없음/.test(x.granted || '') ? '' : 'dim'),
                         text: x.granted || '', title: 'rclone.conf scope: ' + (x.scope_conf || '') }),
-                    el('td', {}, [x.custom_auth ? el('span', { class: 'dim', text: '공유 rclone이 갱신' }) : x.expiry ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet', text: '토큰 갱신',
+                    el('td', {}, [x.auth_mode === 'custom' ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet', text: '토큰 가져오기 시험',
+                        title: '마운트 RC(config/get) 또는 지정한 rclone의 요청 헤더에서 토큰을 가져올 수 있는지 확인합니다.',
+                        onclick: function (e) {
+                            var b = e.target; b.disabled = true;
+                            rpc('test_rc_token', { remote: x.name }).then(function (d) { toast(d.message); }).catch(function (err) { toast(err.message, true); })
+                                .then(function () { b.disabled = false; });
+                        } })
+                      : x.auth_mode === 'memory' ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet', text: '갱신 시험', title: '플러그인이 메모리에서 직접 갱신합니다. rclone.conf에는 쓰지 않습니다.',
+                        onclick: function (e) {
+                            var b = e.target; b.disabled = true;
+                            rpc('test_token', { remote: x.name }).then(function (d) { toast(d.message); }).catch(function (err) { toast(err.message, true); })
+                                .then(function () { b.disabled = false; });
+                        } })
+                      : x.expiry ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet', text: '토큰 갱신',
                         onclick: function (e) {
                             var b = e.target; b.disabled = true; b.textContent = '갱신 중…';
                             rpc('refresh_token', { remote: x.name }).then(function (d) { toast(d.message); checkRclone(true); })
@@ -278,6 +313,11 @@
             });
             out.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, [el('th', { text: 'Drive 리모트' }), el('th', { text: '토큰 만료' }), el('th', { text: '비고' }), el('th', { text: '토큰의 실제 권한' }), el('th', { text: '' })])]), tbody]));
             if (!drives.length) out.appendChild(el('p', { text: '이 설정 파일에 Drive 리모트가 없습니다. rclone.conf 경로를 확인하세요.' }));
+            drives.filter(function (x) { return x.auth_mode === 'custom' && /activity/.test(x.scope_conf || ''); }).forEach(function (x) {
+                out.appendChild(el('p', { class: 'bad', text: x.name + ': 커스텀 인증 리모트의 scope에 drive.activity.readonly가 들어 있습니다. ' +
+                    '이 리모트는 인증 서버가 정한 권한으로만 토큰을 받으므로 scope가 다르면 토큰을 받지 못합니다. rclone.conf에서 scope = drive로 되돌리세요 ' +
+                    '(FF·호스트 마운트도 같은 파일을 씁니다).' }));
+            });
             out.hidden = false;
         }).catch(function (e) {
             clear(out).appendChild(el('p', { class: 'bad', text: 'rclone 확인 실패: ' + e.message }));
@@ -360,8 +400,15 @@
         $$('[data-opt]').forEach(function (i) {
             var key = i.getAttribute('data-opt');
             if (i.type === 'checkbox') {
+                if (st.watch[key] === undefined) st.watch[key] = key.indexOf('notify_') === 0;
                 i.checked = !!st.watch[key];
                 i.onchange = function () { st.watch[key] = i.checked; };
+                return;
+            }
+            if (i.tagName === 'TEXTAREA') {
+                var v = st.watch[key];
+                i.value = Array.isArray(v) ? v.join('\n') : (v || '');
+                i.oninput = function () { st.watch[key] = i.value.split('\n'); };
                 return;
             }
             i.value = st.watch[key] === undefined ? '' : st.watch[key];
@@ -424,6 +471,8 @@
             }
             else if (a === 'log') loadLog();
             else if (a === 'check_rclone') checkRclone(false);
+            else if (a === 'default_patterns') { st.watch.ignore_patterns = (st.defaultIgnore || []).slice(); renderOpts(); }
+            else if (a === 'test_discord') { rpc('test_discord', { url: st.watch.discord_webhook || '' }).then(function (d) { toast(d.message); }).catch(function (err) { toast(err.message, true); }); }
             else if (a === 'check_token') {
                 rpc('check_token', { env: envValues() }).then(function (d) { bind('env-msg').textContent = (d.ok ? '✓ ' : '✗ ') + d.message; })
                     .catch(function (err) { toast(err.message, true); });

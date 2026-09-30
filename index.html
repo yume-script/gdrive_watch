@@ -114,6 +114,21 @@
       <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>
     </div>
 
+    <h3>무시할 경로</h3>
+    <p class="gdw-help">정규식을 한 줄에 하나씩 적습니다(대소문자 무시, <code>#</code>으로 시작하면 주석). 경로가 하나라도 맞으면 기록하지 않습니다. 업로드 중인 <code>[업로드]</code> 폴더를 제외해 두면 올리는 도중에 일부 권만 등록되는 일을 막을 수 있습니다.</p>
+    <textarea class="gdw-textarea" rows="5" data-opt="ignore_patterns" spellcheck="false"></textarea>
+    <div class="gdw-toolbar"><button type="button" class="gdw-btn gdw-btn-quiet" data-act="default_patterns">기본값으로</button></div>
+
+    <h3>디스코드 알림</h3>
+    <p class="gdw-help">처리 묶음마다 결과를 한 번에 보냅니다. 감지 시점이 아니라 스캔까지 끝난 뒤의 결과입니다.</p>
+    <div class="gdw-opts gdw-env">
+      <label class="gdw-wide">웹훅 주소<input type="text" data-opt="discord_webhook" placeholder="https://discord.com/api/webhooks/…"></label>
+      <label class="gdw-check"><input type="checkbox" data-opt="notify_done"> 반영됨</label>
+      <label class="gdw-check"><input type="checkbox" data-opt="notify_failed"> 실패</label>
+      <label class="gdw-check"><input type="checkbox" data-opt="notify_error"> 감시 오류·복구</label>
+    </div>
+    <div class="gdw-toolbar"><button type="button" class="gdw-btn gdw-btn-quiet" data-act="test_discord">시험 전송</button></div>
+
     <div class="gdw-save">
       <button type="button" class="gdw-btn" data-act="save">설정 저장</button>
       <span data-bind="save-msg"></span>
