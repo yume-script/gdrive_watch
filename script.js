@@ -76,6 +76,9 @@
         if (w.error) text += ' · ' + w.error;
         bind('activity').textContent = text;
         bind('toggle').textContent = w.alive ? '중지' : '시작';
+        var ver = bind('version');
+        if (d.version) { ver.textContent = 'v' + d.version; ver.hidden = false; } else { ver.hidden = true; }
+        bind('roots-badge').textContent = (d.roots || []).length + '개';
 
         var warn = clear(bind('warnings'));
         (d.warnings || []).forEach(function (m) { warn.appendChild(el('li', { text: m })); });

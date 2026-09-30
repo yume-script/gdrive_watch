@@ -1,44 +1,79 @@
+<!-- plugins/metadata/gdrive_watch/index.html -->
 <div id="gdw-app" class="gdw">
-  <header class="gdw-head">
-    <div class="gdw-state">
-      <span class="gdw-pulse" data-bind="pulse"></span>
-      <div>
-        <h2 class="gdw-title">드라이브 변경 감시</h2>
-        <p class="gdw-sub" data-bind="activity">상태를 불러오는 중…</p>
-      </div>
+
+  <header class="gdw-header">
+    <div class="gdw-header-actions">
+      <button type="button" class="gdw-pill-btn" data-act="poll_now" title="Drive 변경을 지금 확인">
+        <span class="gdw-pill-icon"><svg viewBox="0 0 16 16"><path d="M13.65 2.35a7.958 7.958 0 0 0-11.3 0L1 3.7V1H0v4h4V4H1.7l1-1a6.965 6.965 0 0 1 9.9 0 6.965 6.965 0 0 1 0 9.9 6.965 6.965 0 0 1-9.9 0 6.93 6.93 0 0 1-1.7-2.86l-.96.29a7.94 7.94 0 0 0 1.95 3.27 7.958 7.958 0 0 0 11.3 0 7.958 7.958 0 0 0 0-11.3Z"/></svg></span>
+        지금 확인
+      </button>
+      <button type="button" class="gdw-pill-btn" data-act="toggle" title="감시 시작/중지">
+        <span class="gdw-pill-icon"><svg viewBox="0 0 16 16"><path d="M7.5 1v7h1V1h-1z"/><path d="M3 8.812a4.999 4.999 0 0 1 2.578-4.375l-.485-.874A6 6 0 1 0 11 3.616l-.501.865A5 5 0 1 1 3 8.812z"/></svg></span>
+        <span data-bind="toggle">시작</span>
+      </button>
+      <button type="button" class="gdw-pill-btn" data-act="restart" title="워커를 다시 시작">
+        <span class="gdw-pill-icon"><svg viewBox="0 0 16 16"><path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/><path d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/></svg></span>
+        재시작
+      </button>
     </div>
-    <div class="gdw-actions">
-      <button type="button" class="gdw-btn" data-act="poll_now" title="Drive 변경을 지금 확인">지금 확인</button>
-      <button type="button" class="gdw-btn" data-act="toggle" data-bind="toggle">시작</button>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="restart">재시작</button>
+    <h1 class="gdw-title">
+      <span class="gdw-title-icon"><svg viewBox="0 0 16 16"><path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383zm.653.757c-.757.653-1.153 1.44-1.153 2.056v.448l-.445.049C2.064 6.805 1 7.952 1 9.318 1 10.785 2.23 12 3.781 12h8.906C13.98 12 15 10.988 15 9.773c0-1.216-1.02-2.228-2.313-2.228h-.5v-.5C12.188 4.825 10.328 3 8 3a4.53 4.53 0 0 0-2.941 1.1z"/><path d="M10.854 7.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 9.793l2.646-2.647a.5.5 0 0 1 .708 0z"/></svg></span>
+      드라이브 변경 감시
+      <span class="gdw-title-version" data-bind="version" hidden></span>
+    </h1>
+    <p class="gdw-desc">Google Drive·로컬 폴더의 변경을 감지해 rclone VFS를 새로고침하고, 바뀐 폴더만 BookOasis에 부분 스캔을 요청합니다.</p>
+    <p class="gdw-state"><span class="gdw-pulse" data-bind="pulse"></span><span data-bind="activity">상태를 불러오는 중…</span></p>
+    <div class="gdw-tally">
+      <button type="button" class="gdw-flow-seg" data-filter="pending"><span>대기</span><strong data-count="pending">0</strong></button>
+      <button type="button" class="gdw-flow-seg is-done" data-filter="done"><span>반영됨</span><strong data-count="done">0</strong></button>
+      <button type="button" class="gdw-flow-seg is-skip" data-filter="skipped"><span>보관함 밖</span><strong data-count="skipped">0</strong></button>
+      <button type="button" class="gdw-flow-seg is-fail" data-filter="failed"><span>실패</span><strong data-count="failed">0</strong></button>
     </div>
+    <p class="gdw-meta" data-bind="meta"></p>
   </header>
 
   <ul class="gdw-warn" data-bind="warnings" hidden></ul>
 
-  <section class="gdw-flow" aria-label="처리 현황">
-    <button type="button" class="gdw-flow-seg" data-filter="pending"><b data-count="pending">0</b><span>대기</span></button>
-    <button type="button" class="gdw-flow-seg is-done" data-filter="done"><b data-count="done">0</b><span>반영됨</span></button>
-    <button type="button" class="gdw-flow-seg is-skip" data-filter="skipped"><b data-count="skipped">0</b><span>보관함 밖</span></button>
-    <button type="button" class="gdw-flow-seg is-fail" data-filter="failed"><b data-count="failed">0</b><span>실패</span></button>
-    <p class="gdw-flow-meta" data-bind="meta"></p>
-  </section>
-
-  <section class="gdw-roots">
-    <table>
-      <thead><tr><th>감시 폴더</th><th>방식</th><th>상태</th><th>추적 항목</th><th>마지막 변경</th><th></th></tr></thead>
-      <tbody data-bind="roots"><tr><td colspan="6" class="gdw-empty">불러오는 중…</td></tr></tbody>
-    </table>
+  <section class="gdw-panel">
+    <div class="gdw-panel-head">
+      <div class="gdw-panel-title">
+        <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.826a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31zM2.19 4a1 1 0 0 0-.996 1.09l.637 7a1 1 0 0 0 .995.91h10.348a1 1 0 0 0 .995-.91l.637-7A1 1 0 0 0 13.81 4H2.19zm4.69-1.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707z"/></svg></span>
+        <h2>감시 폴더</h2>
+      </div>
+      <span class="gdw-badge" data-bind="roots-badge">0개</span>
+    </div>
+    <div class="gdw-table-wrap">
+      <table class="gdw-roots">
+        <thead><tr><th>감시 폴더</th><th>방식</th><th>상태</th><th>추적 항목</th><th>마지막 변경</th><th></th></tr></thead>
+        <tbody data-bind="roots"><tr><td colspan="6" class="gdw-empty">불러오는 중…</td></tr></tbody>
+      </table>
+    </div>
   </section>
 
   <nav class="gdw-tabs" role="tablist">
-    <button type="button" role="tab" class="is-on" data-tab="events">변경 기록</button>
-    <button type="button" role="tab" data-tab="setup">감시 설정</button>
-    <button type="button" role="tab" data-tab="log">로그</button>
+    <button type="button" role="tab" class="gdw-chip is-on" data-tab="events">변경 기록</button>
+    <button type="button" role="tab" class="gdw-chip" data-tab="setup">감시 설정</button>
+    <button type="button" role="tab" class="gdw-chip" data-tab="log">로그</button>
   </nav>
 
   <!-- 변경 기록 -->
   <section class="gdw-pane" data-pane="events">
+    <div class="gdw-panel gdw-panel-tight">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h12zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2H2z"/><path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/></svg></span>
+          <h2>경로 직접 반영</h2>
+        </div>
+        <span class="gdw-badge">수동 요청</span>
+      </div>
+      <div class="gdw-form">
+        <input type="text" data-bind="manual-path" placeholder="직접 반영할 경로 (컨테이너 기준, 예: /mnt/gds2/GDRIVE/READING/잡지/월간A)" autocomplete="off">
+        <button type="button" class="gdw-btn" data-act="manual_create">추가로 반영</button>
+        <button type="button" class="gdw-btn gdw-btn-quiet" data-act="manual_delete">삭제로 반영</button>
+      </div>
+      <p class="gdw-tip">감시와 같은 처리(VFS 새로고침 → 파일 확인 → 스캔)를 거칩니다. 감시 폴더 밖이거나 놓친 변경을 손으로 반영할 때 씁니다.</p>
+    </div>
+
     <div class="gdw-toolbar">
       <select data-bind="f-status" aria-label="상태">
         <option value="">전체 상태</option>
@@ -51,110 +86,152 @@
       </select>
       <input type="search" data-bind="f-q" placeholder="경로나 메시지 검색" aria-label="검색">
       <span class="gdw-grow"></span>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="retry_selected">선택 재시도</button>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="retry_failed">실패 전부 재시도</button>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="delete_selected">선택 삭제</button>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="clear_done">반영된 기록 정리</button>
-    </div>
-    <div class="gdw-manual">
-      <input type="text" data-bind="manual-path" placeholder="직접 반영할 경로 (컨테이너 기준, 예: /mnt/gds2/GDRIVE/READING/잡지/월간A)">
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="manual_create">추가로 반영</button>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="manual_delete">삭제로 반영</button>
+      <button type="button" class="gdw-pill-btn" data-act="retry_selected">선택 재시도</button>
+      <button type="button" class="gdw-pill-btn" data-act="retry_failed">실패 전부 재시도</button>
+      <button type="button" class="gdw-pill-btn" data-act="delete_selected">선택 삭제</button>
+      <button type="button" class="gdw-pill-btn" data-act="clear_done">반영된 기록 정리</button>
     </div>
     <ol class="gdw-events" data-bind="events"></ol>
     <div class="gdw-pager">
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="prev">이전</button>
+      <button type="button" class="gdw-pill-btn" data-act="prev">이전</button>
       <span data-bind="page"></span>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="next">다음</button>
+      <button type="button" class="gdw-pill-btn" data-act="next">다음</button>
     </div>
   </section>
 
   <!-- 감시 설정 -->
   <section class="gdw-pane" data-pane="setup" hidden>
-    <h3>실행 환경</h3>
-    <p class="gdw-help">BookOasis 컨테이너 안에서의 경로입니다. 여기서 저장하면 환경설정의 플러그인 설정에도 같이 반영됩니다.</p>
-    <div class="gdw-opts gdw-env">
-      <label class="gdw-wide">rclone 실행 파일<input type="text" data-env="rclone_path" placeholder="/usr/bin/rclone"></label>
-      <label class="gdw-wide">rclone.conf 경로 <small>(비우면 rclone 기본 위치)</small><input type="text" data-env="rclone_config" placeholder="/config/rclone/rclone.conf"></label>
-      <label class="gdw-wide">BookOasis 내부 주소<input type="text" data-env="bookoasis_url" placeholder="http://127.0.0.1:5930"></label>
-      <label class="gdw-wide">WEBHOOK_TOKEN <small>(비워 두면 BookOasis .env 값을 그대로 사용 · 권장)</small><input type="password" data-env="webhook_token" autocomplete="new-password" readonly onfocus="this.removeAttribute('readonly')"></label>
-      <label class="gdw-check"><input type="checkbox" data-env="clear_token"> 입력해 둔 토큰을 지우고 .env 값 사용</label>
-      <label class="gdw-check"><input type="checkbox" data-env="auto_start"> BookOasis가 시작될 때 감시도 자동으로 시작</label>
-    </div>
-    <div class="gdw-save">
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="check_rclone">rclone 확인</button>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="check_token">토큰 확인</button>
-      <button type="button" class="gdw-btn" data-act="save_env">실행 환경 저장</button>
-      <span data-bind="env-msg"></span>
-    </div>
-    <div class="gdw-rclone" data-bind="rclone-out" hidden></div>
-
-    <h3>감시할 폴더</h3>
-    <p class="gdw-help">Drive 폴더는 주소의 <code>folders/</code> 뒤 값을 폴더 ID로 넣고, 로컬 경로에는 BookOasis 컨테이너에서 그 폴더가 보이는 경로를 넣습니다. 로컬 디스크·NAS 폴더는 방식을 <b>로컬 폴더</b>로 고르세요.</p>
-    <div class="gdw-rows" data-bind="root-rows"></div>
-    <button type="button" class="gdw-btn gdw-btn-quiet" data-act="add_root">폴더 추가</button>
-
-    <h3>rclone VFS 새로고침</h3>
-    <p class="gdw-help">보관함에 설정된 RC 주소로 자동으로 새로고침합니다. 각 보관함 폴더가 마운트 안 어디에 있는지는 처음 변경이 생길 때 찾아서 기억합니다.</p>
-    <div class="gdw-toolbar">
-      <span class="gdw-grow" data-bind="vfs-summary"></span>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="detect_all">지금 모두 감지</button>
-    </div>
-    <div class="gdw-vfsmap"><table>
-      <thead><tr><th>보관함</th><th>폴더</th><th>RC</th><th>마운트 안 경로</th><th></th></tr></thead>
-      <tbody data-bind="vfs-map"></tbody>
-    </table></div>
-    <details class="gdw-libs" data-bind="manual-box">
-      <summary>직접 지정 <small>(RC가 없는 보관함, 여러 마운트에 동시에 새로고침할 때)</small></summary>
-      <p class="gdw-help">여기 규칙이 있는 경로는 자동 감지 대신 이 규칙을 씁니다. 마운트 경로는 rclone 마운트의 루트(예: /mnt/gds2)입니다.</p>
-      <div class="gdw-rows" data-bind="vfs-rows"></div>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="add_vfs">규칙 추가</button>
-    </details>
-
-    <h3>처리 옵션</h3>
-    <div class="gdw-opts">
-      <label>확인 주기(초)<input type="number" min="15" data-opt="poll_seconds"></label>
-      <label>모아서 처리(초)<input type="number" min="0" data-opt="buffer_seconds"></label>
-      <label>최대 재시도<input type="number" min="1" data-opt="max_attempts"></label>
-      <label>기록 보관(일)<input type="number" min="1" data-opt="keep_days"></label>
-      <label title="VFS 새로고침 뒤 마운트에 파일이 실제로 보일 때까지 기다리는 최대 시간. 0이면 확인하지 않음">파일 확인 대기(분)<input type="number" min="0" data-opt="file_wait_minutes"></label>
-      <label class="gdw-check"><input type="checkbox" data-opt="verbose_log"> 자세한 로그 (변경 하나하나를 어떻게 처리했는지 로그에 남김)</label>
-      <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>
+    <div class="gdw-panel">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/><path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z"/></svg></span>
+          <h2>실행 환경</h2>
+        </div>
+        <span class="gdw-badge">RCLONE</span>
+      </div>
+      <p class="gdw-tip gdw-tip-top">BookOasis 컨테이너 안에서의 경로입니다. 여기서 저장하면 환경설정의 플러그인 설정에도 같이 반영됩니다.</p>
+      <div class="gdw-opts gdw-env">
+        <label class="gdw-wide">rclone 실행 파일<input type="text" data-env="rclone_path" placeholder="/usr/bin/rclone"></label>
+        <label class="gdw-wide">rclone.conf 경로 <small>(비우면 rclone 기본 위치)</small><input type="text" data-env="rclone_config" placeholder="/config/rclone/rclone.conf"></label>
+        <label class="gdw-wide">BookOasis 내부 주소<input type="text" data-env="bookoasis_url" placeholder="http://127.0.0.1:5930"></label>
+        <label class="gdw-wide">WEBHOOK_TOKEN <small>(비워 두면 BookOasis .env 값을 그대로 사용 · 권장)</small><input type="password" data-env="webhook_token" autocomplete="new-password" readonly onfocus="this.removeAttribute('readonly')"></label>
+        <label class="gdw-check"><input type="checkbox" data-env="clear_token"> 입력해 둔 토큰을 지우고 .env 값 사용</label>
+        <label class="gdw-check"><input type="checkbox" data-env="auto_start"> BookOasis가 시작될 때 감시도 자동으로 시작</label>
+      </div>
+      <div class="gdw-actions-row">
+        <button type="button" class="gdw-pill-btn" data-act="check_rclone">rclone 확인</button>
+        <button type="button" class="gdw-pill-btn" data-act="check_token">토큰 확인</button>
+        <button type="button" class="gdw-btn" data-act="save_env">실행 환경 저장</button>
+        <span class="gdw-save-msg" data-bind="env-msg"></span>
+      </div>
+      <div class="gdw-rclone" data-bind="rclone-out" hidden></div>
     </div>
 
-    <h3>무시할 경로</h3>
-    <p class="gdw-help">정규식을 한 줄에 하나씩 적습니다(대소문자 무시, <code>#</code>으로 시작하면 주석). 경로가 하나라도 맞으면 기록하지 않습니다. 업로드 중인 <code>[업로드]</code> 폴더를 제외해 두면 올리는 도중에 일부 권만 등록되는 일을 막을 수 있습니다.</p>
-    <textarea class="gdw-textarea" rows="5" data-opt="ignore_patterns" spellcheck="false"></textarea>
-    <div class="gdw-toolbar"><button type="button" class="gdw-btn gdw-btn-quiet" data-act="default_patterns">기본값으로</button></div>
-
-    <h3>디스코드 알림</h3>
-    <p class="gdw-help">처리 묶음마다 결과를 한 번에 보냅니다. 감지 시점이 아니라 스캔까지 끝난 뒤의 결과입니다.</p>
-    <div class="gdw-opts gdw-env">
-      <label class="gdw-wide">웹훅 주소<input type="text" data-opt="discord_webhook" placeholder="https://discord.com/api/webhooks/…"></label>
-      <label class="gdw-check"><input type="checkbox" data-opt="notify_done"> 반영됨</label>
-      <label class="gdw-check"><input type="checkbox" data-opt="notify_failed"> 실패</label>
-      <label class="gdw-check"><input type="checkbox" data-opt="notify_error"> 감시 오류·복구</label>
-    </div>
-    <div class="gdw-toolbar"><button type="button" class="gdw-btn gdw-btn-quiet" data-act="test_discord">시험 전송</button></div>
-
-    <div class="gdw-save">
-      <button type="button" class="gdw-btn" data-act="save">설정 저장</button>
-      <span data-bind="save-msg"></span>
+    <div class="gdw-panel">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.826a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31zM2.19 4a1 1 0 0 0-.996 1.09l.637 7a1 1 0 0 0 .995.91h10.348a1 1 0 0 0 .995-.91l.637-7A1 1 0 0 0 13.81 4H2.19z"/></svg></span>
+          <h2>감시할 폴더</h2>
+        </div>
+        <span class="gdw-badge">DRIVE · 로컬</span>
+      </div>
+      <p class="gdw-tip gdw-tip-top">Drive 폴더는 주소의 <code>folders/</code> 뒤 값을 폴더 ID로 넣고, 로컬 경로에는 BookOasis 컨테이너에서 그 폴더가 보이는 경로를 넣습니다. 로컬 디스크·NAS 폴더는 방식을 <b>로컬 폴더</b>로 고르세요.</p>
+      <div class="gdw-rows" data-bind="root-rows"></div>
+      <div class="gdw-actions-row"><button type="button" class="gdw-pill-btn" data-act="add_root">+ 폴더 추가</button></div>
     </div>
 
-    <h3>경로 확인</h3>
-    <div class="gdw-preview">
-      <input type="text" data-bind="preview-path" placeholder="/mnt/gds/책/시리즈/01권.cbz">
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="preview">확인</button>
+    <div class="gdw-panel">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M13.65 2.35a7.958 7.958 0 0 0-11.3 0L1 3.7V1H0v4h4V4H1.7l1-1a6.965 6.965 0 0 1 9.9 0 6.965 6.965 0 0 1 0 9.9 6.965 6.965 0 0 1-9.9 0 6.93 6.93 0 0 1-1.7-2.86l-.96.29a7.94 7.94 0 0 0 1.95 3.27 7.958 7.958 0 0 0 11.3 0 7.958 7.958 0 0 0 0-11.3Z"/></svg></span>
+          <h2>rclone VFS 새로고침</h2>
+        </div>
+        <span class="gdw-badge">자동 감지</span>
+      </div>
+      <p class="gdw-tip gdw-tip-top">보관함에 설정된 RC 주소로 자동으로 새로고침합니다. 각 보관함 폴더가 마운트 안 어디에 있는지는 처음 변경이 생길 때 찾아서 기억합니다.</p>
+      <div class="gdw-toolbar">
+        <span class="gdw-grow gdw-muted" data-bind="vfs-summary"></span>
+        <button type="button" class="gdw-pill-btn" data-act="detect_all">지금 모두 감지</button>
+      </div>
+      <div class="gdw-vfsmap"><table>
+        <thead><tr><th>보관함</th><th>폴더</th><th>RC</th><th>마운트 안 경로</th><th></th></tr></thead>
+        <tbody data-bind="vfs-map"></tbody>
+      </table></div>
+      <details class="gdw-details" data-bind="manual-box">
+        <summary>직접 지정 <small>(RC가 없는 보관함, 여러 마운트에 동시에 새로고침할 때)</small></summary>
+        <div class="gdw-details-body">
+          <p class="gdw-tip">여기 규칙이 있는 경로는 자동 감지 대신 이 규칙을 씁니다. 마운트 경로는 rclone 마운트의 루트(예: /mnt/gds2)이고, RC 주소에 <code>http://아이디:비밀번호@호스트:포트</code> 형식도 쓸 수 있습니다.</p>
+          <div class="gdw-rows" data-bind="vfs-rows"></div>
+          <div class="gdw-actions-row"><button type="button" class="gdw-pill-btn" data-act="add_vfs">+ 규칙 추가</button></div>
+        </div>
+      </details>
     </div>
-    <pre class="gdw-pre" data-bind="preview-out" hidden></pre>
+
+    <div class="gdw-panel">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M1.5 1.5A.5.5 0 0 1 2 1h12a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-.128.334L10 8.692V13.5a.5.5 0 0 1-.342.474l-3 1A.5.5 0 0 1 6 14.5V8.692L1.628 3.834A.5.5 0 0 1 1.5 3.5v-2z"/></svg></span>
+          <h2>처리 옵션</h2>
+        </div>
+        <span class="gdw-badge">옵션</span>
+      </div>
+      <div class="gdw-opts">
+        <label>확인 주기(초)<input type="number" min="15" data-opt="poll_seconds"></label>
+        <label>모아서 처리(초)<input type="number" min="0" data-opt="buffer_seconds"></label>
+        <label>최대 재시도<input type="number" min="1" data-opt="max_attempts"></label>
+        <label>기록 보관(일)<input type="number" min="1" data-opt="keep_days"></label>
+        <label title="VFS 새로고침 뒤 마운트에 파일이 실제로 보일 때까지 기다리는 최대 시간. 0이면 확인하지 않음">파일 확인 대기(분)<input type="number" min="0" data-opt="file_wait_minutes"></label>
+        <label class="gdw-check"><input type="checkbox" data-opt="verbose_log"> 자세한 로그 (변경 하나하나를 어떻게 처리했는지 로그에 남김)</label>
+        <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>
+      </div>
+      <details class="gdw-details">
+        <summary>무시할 경로 <small>(정규식, 한 줄에 하나)</small></summary>
+        <div class="gdw-details-body">
+          <p class="gdw-tip">대소문자를 구분하지 않고, <code>#</code>으로 시작하면 주석입니다. 경로가 하나라도 맞으면 기록하지 않습니다. 업로드 중인 <code>[업로드]</code> 폴더를 제외해 두면 올리는 도중에 일부 권만 등록되는 일을 막을 수 있습니다.</p>
+          <textarea class="gdw-textarea" rows="5" data-opt="ignore_patterns" spellcheck="false"></textarea>
+          <div class="gdw-actions-row"><button type="button" class="gdw-pill-btn" data-act="default_patterns">기본값으로</button></div>
+        </div>
+      </details>
+      <details class="gdw-details">
+        <summary>디스코드 알림 <small>(처리 결과·감시 오류)</small></summary>
+        <div class="gdw-details-body">
+          <p class="gdw-tip">처리 묶음마다 결과를 한 번에 보냅니다. 감지 시점이 아니라 스캔까지 끝난 뒤의 결과입니다.</p>
+          <div class="gdw-opts gdw-env">
+            <label class="gdw-wide">웹훅 주소<input type="text" data-opt="discord_webhook" placeholder="https://discord.com/api/webhooks/…"></label>
+            <label class="gdw-check"><input type="checkbox" data-opt="notify_done"> 반영됨</label>
+            <label class="gdw-check"><input type="checkbox" data-opt="notify_failed"> 실패</label>
+            <label class="gdw-check"><input type="checkbox" data-opt="notify_error"> 감시 오류·복구</label>
+          </div>
+          <div class="gdw-actions-row"><button type="button" class="gdw-pill-btn" data-act="test_discord">시험 전송</button></div>
+        </div>
+      </details>
+      <div class="gdw-actions-row gdw-save">
+        <button type="button" class="gdw-btn" data-act="save">설정 저장</button>
+        <span class="gdw-save-msg" data-bind="save-msg"></span>
+      </div>
+    </div>
+
+    <div class="gdw-panel">
+      <div class="gdw-panel-head">
+        <div class="gdw-panel-title">
+          <span class="gdw-panel-icon"><svg viewBox="0 0 16 16"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/></svg></span>
+          <h2>경로 확인</h2>
+        </div>
+        <span class="gdw-badge">미리보기</span>
+      </div>
+      <div class="gdw-form">
+        <input type="text" data-bind="preview-path" placeholder="/mnt/gds/책/시리즈/01권.cbz" autocomplete="off">
+        <button type="button" class="gdw-btn" data-act="preview">확인</button>
+      </div>
+      <pre class="gdw-pre" data-bind="preview-out" hidden></pre>
+    </div>
   </section>
 
   <!-- 로그 -->
   <section class="gdw-pane" data-pane="log" hidden>
     <div class="gdw-toolbar">
       <span class="gdw-grow"></span>
-      <button type="button" class="gdw-btn gdw-btn-quiet" data-act="log">새로고침</button>
+      <button type="button" class="gdw-pill-btn" data-act="log">새로고침</button>
     </div>
     <pre class="gdw-pre gdw-log" data-bind="log"></pre>
   </section>

@@ -1,97 +1,393 @@
+/* plugins/metadata/gdrive_watch/style.css
+   plugin_board와 같은 디자인 언어(헤더 카드·알약 버튼·패널·칩)로 맞춘 스타일.
+   8종 대시보드 테마와 동기화되도록 색은 전역 CSS 변수(var(--app-*))만 사용합니다. */
+
 .gdw {
-    --gdw-ok: #2f9e6e;
-    --gdw-fail: #d9534f;
-    --gdw-wait: #d9a13b;
-    --gdw-skip: var(--app-text-muted);
-    color: var(--app-text-primary);
-    padding: 1.25rem clamp(0.75rem, 2vw, 2rem) 3rem;
-    max-width: 1200px;
-    font-size: 0.92rem;
-    line-height: 1.5;
+  --gdw-ok: color-mix(in srgb, #3f9e6f 88%, var(--app-text-primary));
+  --gdw-fail: color-mix(in srgb, #c0554f 88%, var(--app-text-primary));
+  --gdw-wait: color-mix(in srgb, #c9973a 88%, var(--app-text-primary));
+  padding: 4px 2px 32px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--app-text-primary, #e5e5e5);
 }
 .gdw [hidden] { display: none !important; }
-.gdw code { font-size: 0.85em; padding: 0 0.3em; border-radius: 4px; background: var(--app-input-bg); }
+.gdw code {
+  background: var(--app-bg-main);
+  border: 1px solid var(--app-border, rgba(255,255,255,0.12));
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  color: var(--app-text-primary);
+}
+.gdw b { color: var(--app-text-primary); }
+.gdw button:focus-visible, .gdw input:focus-visible, .gdw select:focus-visible, .gdw textarea:focus-visible, .gdw summary:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+}
 
-/* 상단 */
-.gdw-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
-.gdw-state { display: flex; align-items: center; gap: 0.85rem; }
-.gdw-title { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; }
-.gdw-sub { margin: 0.1rem 0 0; color: var(--app-text-muted); font-size: 0.85rem; }
-.gdw-pulse { width: 12px; height: 12px; border-radius: 50%; background: var(--gdw-skip); flex: none; }
-.gdw-pulse.is-on { background: var(--gdw-ok); box-shadow: 0 0 0 0 rgba(47, 158, 110, 0.55); animation: gdw-pulse 2.4s ease-out infinite; }
+/* ---------- 헤더 ---------- */
+.gdw-header {
+  background: var(--app-bg-sidebar, var(--app-bg-card));
+  border: 1px solid var(--app-border, rgba(255,255,255,0.1));
+  border-radius: 10px;
+  padding: 22px 26px 18px;
+  position: relative;
+}
+.gdw-header-actions {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.gdw-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: clamp(22px, 3.2vw, 30px);
+  font-weight: 700;
+  margin: 0 0 8px;
+  padding-right: 300px;
+  color: var(--app-text-primary);
+}
+.gdw-title-icon {
+  width: 0.9em;
+  height: 0.9em;
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--app-accent);
+}
+.gdw-title-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.gdw-title-version {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-muted);
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 30%, transparent);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  align-self: center;
+}
+.gdw-desc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--app-text-muted, #9ca3af);
+  max-width: 78ch;
+}
+.gdw-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-secondary, var(--app-text-primary));
+}
+.gdw-pulse {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--app-text-muted);
+  flex-shrink: 0;
+}
+.gdw-pulse.is-on {
+  background: var(--gdw-ok);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--gdw-ok) 55%, transparent);
+  animation: gdw-pulse 2.4s ease-out infinite;
+}
 .gdw-pulse.is-busy { background: var(--app-accent); }
-@keyframes gdw-pulse { 70% { box-shadow: 0 0 0 9px rgba(47, 158, 110, 0); } 100% { box-shadow: 0 0 0 0 rgba(47, 158, 110, 0); } }
+@keyframes gdw-pulse {
+  70% { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
 @media (prefers-reduced-motion: reduce) { .gdw-pulse.is-on { animation: none; } }
-.gdw-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 
-.gdw-btn {
-    background: var(--app-accent); color: #fff; border: 1px solid transparent; border-radius: 6px;
-    padding: 0.42rem 0.9rem; font: inherit; font-weight: 600; cursor: pointer;
+/* 집계 (plugin_board의 pb-tally와 같은 형태, 클릭하면 해당 상태로 필터) */
+.gdw-tally {
+  display: flex;
+  gap: 8px 26px;
+  margin-top: 16px;
+  flex-wrap: wrap;
 }
-.gdw-btn:hover { background: var(--app-accent-hover); }
-.gdw-btn:focus-visible, .gdw button:focus-visible, .gdw input:focus-visible, .gdw select:focus-visible { outline: 2px solid var(--app-accent); outline-offset: 2px; }
-.gdw-btn-quiet { background: transparent; color: var(--app-text-primary); border-color: var(--app-border); font-weight: 500; }
-.gdw-btn-quiet:hover { background: var(--app-bg-card-hover); }
-.gdw-btn:disabled { opacity: 0.5; cursor: default; }
-
-.gdw-warn { list-style: none; margin: 0 0 1rem; padding: 0.6rem 0.9rem; border-left: 3px solid var(--gdw-wait); background: var(--app-bg-card); border-radius: 0 6px 6px 0; }
-.gdw-warn li { color: var(--app-text-secondary); font-size: 0.87rem; }
-
-/* 처리 흐름: 대기 → 반영/밖/실패 를 한 줄 막대로 */
-.gdw-flow { display: flex; flex-wrap: wrap; align-items: stretch; border: 1px solid var(--app-border); border-radius: 8px; overflow: hidden; background: var(--app-bg-card); margin-bottom: 1rem; }
 .gdw-flow-seg {
-    flex: 1 1 110px; display: flex; align-items: baseline; gap: 0.45rem; padding: 0.8rem 1rem;
-    background: none; border: 0; border-right: 1px solid var(--app-border-light); color: inherit; font: inherit; cursor: pointer; text-align: left;
-    border-top: 3px solid var(--gdw-wait);
+  background: none;
+  border: 0;
+  padding: 2px 0 4px;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: border-color .15s ease;
 }
-.gdw-flow-seg.is-done { border-top-color: var(--gdw-ok); }
-.gdw-flow-seg.is-skip { border-top-color: var(--app-border); }
-.gdw-flow-seg.is-fail { border-top-color: var(--gdw-fail); }
-.gdw-flow-seg:hover, .gdw-flow-seg.is-active { background: var(--app-bg-card-hover); }
-.gdw-flow-seg b { font-size: 1.5rem; font-variant-numeric: tabular-nums; line-height: 1; }
-.gdw-flow-seg span { color: var(--app-text-muted); font-size: 0.82rem; }
-.gdw-flow-seg small { color: var(--app-text-muted); }
-.gdw-flow-meta { flex: 1 1 100%; margin: 0; padding: 0.45rem 1rem; border-top: 1px solid var(--app-border-light); color: var(--app-text-muted); font-size: 0.8rem; }
+.gdw-flow-seg span {
+  display: block;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--app-text-muted);
+}
+.gdw-flow-seg strong {
+  display: block;
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--app-accent, var(--app-text-primary));
+  font-variant-numeric: tabular-nums;
+}
+.gdw-flow-seg.is-done strong { color: var(--gdw-ok); }
+.gdw-flow-seg.is-skip strong { color: var(--app-text-secondary, var(--app-text-muted)); }
+.gdw-flow-seg.is-fail strong { color: var(--gdw-fail); }
+.gdw-flow-seg:hover, .gdw-flow-seg.is-active { border-bottom-color: color-mix(in srgb, var(--app-accent) 60%, transparent); }
+.gdw-meta {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
 
-/* 감시 폴더 표 */
-.gdw-roots { overflow-x: auto; margin-bottom: 1.25rem; }
+/* ---------- 알약 버튼 (plugin_board pb-refresh-btn) ---------- */
+.gdw-pill-btn, .gdw-btn-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--app-text-secondary, var(--app-text-primary));
+  background: var(--app-bg-card);
+  border: 1px solid var(--app-border, rgba(255,255,255,0.18));
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s ease, color .15s ease;
+}
+.gdw-pill-btn:hover:not(:disabled), .gdw-btn-quiet:hover:not(:disabled) {
+  background: var(--app-bg-card-hover);
+  color: var(--app-text-primary);
+}
+.gdw-pill-icon { width: 12px; height: 12px; display: inline-flex; flex-shrink: 0; }
+.gdw-pill-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.gdw-pill-btn:disabled, .gdw-btn:disabled { opacity: 0.6; cursor: progress; transform: none; }
+
+/* 강조 버튼 (plugin_board pb-git-panel-form button) */
+.gdw-btn {
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 42%, transparent);
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s ease, transform .15s ease;
+}
+.gdw-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-accent) 26%, transparent);
+  transform: translateY(-1px);
+}
+/* .gdw-btn.gdw-btn-quiet 는 알약 버튼 모양으로 (보조 동작) */
+.gdw-btn.gdw-btn-quiet {
+  font-size: 11.5px;
+  color: var(--app-text-secondary, var(--app-text-primary));
+  background: var(--app-bg-card);
+  border: 1px solid var(--app-border, rgba(255,255,255,0.18));
+  padding: 6px 12px;
+  border-radius: 999px;
+}
+.gdw-btn.gdw-btn-quiet:hover:not(:disabled) { background: var(--app-bg-card-hover); color: var(--app-text-primary); transform: none; }
+.gdw-form .gdw-btn.gdw-btn-quiet { padding: 8px 16px; font-size: 12.5px; border-radius: 8px; }
+
+/* ---------- 경고 ---------- */
+.gdw-warn {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 12px 18px;
+  background: color-mix(in srgb, var(--gdw-wait) 8%, var(--app-bg-card));
+  border: 1px solid color-mix(in srgb, var(--gdw-wait) 40%, transparent);
+  border-radius: 10px;
+}
+.gdw-warn li { font-size: 12px; color: var(--app-text-secondary, var(--app-text-primary)); }
+.gdw-warn li::before { content: "⚠ "; color: var(--gdw-wait); }
+
+/* ---------- 패널 (plugin_board pb-git-panel) ---------- */
+.gdw-panel {
+  margin-top: 16px;
+  background: var(--app-bg-card);
+  border: 1px solid var(--app-border, rgba(255,255,255,0.1));
+  border-radius: 10px;
+  padding: 16px 20px 18px;
+}
+.gdw-panel-tight { margin-top: 0; margin-bottom: 14px; }
+.gdw-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.gdw-panel-title { display: flex; align-items: center; gap: 8px; }
+.gdw-panel-title h2 { margin: 0; font-size: 14px; font-weight: 700; color: var(--app-text-primary); }
+.gdw-panel-icon { width: 17px; height: 17px; display: inline-flex; color: var(--app-accent); flex-shrink: 0; }
+.gdw-panel-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.gdw-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 40%, transparent);
+  padding: 4px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.gdw-tip, .gdw-help {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--app-text-muted);
+  max-width: 90ch;
+}
+.gdw-tip-top { margin: 0 0 12px; }
+.gdw-muted { color: var(--app-text-muted); font-size: 11.5px; }
+
+.gdw-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.gdw input, .gdw select, .gdw-textarea {
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--app-input-bg, var(--app-bg-main));
+  border: 1px solid var(--app-border, rgba(255,255,255,0.15));
+  color: var(--app-text-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+.gdw input::placeholder, .gdw-textarea::placeholder { color: var(--app-text-muted); }
+.gdw input[type=checkbox] { padding: 0; width: 14px; height: 14px; accent-color: var(--app-accent); }
+.gdw-form input { flex: 1 1 280px; }
+.gdw-actions-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.gdw-save-msg { font-size: 11.5px; color: var(--app-text-muted); }
+
+/* ---------- 감시 폴더 표 ---------- */
+.gdw-table-wrap, .gdw-vfsmap { overflow-x: auto; }
 .gdw table { width: 100%; border-collapse: collapse; }
-.gdw th { text-align: left; font-weight: 600; color: var(--app-text-muted); font-size: 0.8rem; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--app-border); }
-.gdw td { padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--app-border-light); vertical-align: top; }
-.gdw td small { display: block; color: var(--app-text-muted); word-break: break-all; }
-.gdw-empty { color: var(--app-text-muted); text-align: center; padding: 1.2rem; }
-.gdw-tag { display: inline-block; font-size: 0.78rem; padding: 0.05rem 0.45rem; border-radius: 4px; border: 1px solid var(--app-border); color: var(--app-text-secondary); white-space: nowrap; }
-.gdw-tag.ok { border-color: var(--gdw-ok); color: var(--gdw-ok); }
-.gdw-tag.fail { border-color: var(--gdw-fail); color: var(--gdw-fail); }
-.gdw-tag.wait { border-color: var(--gdw-wait); color: var(--gdw-wait); }
-.gdw-err { color: var(--gdw-fail); font-size: 0.8rem; }
-
-/* 탭 */
-.gdw-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--app-border); margin-bottom: 1rem; }
-.gdw-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 0.55rem 0.9rem; color: var(--app-text-muted); font: inherit; cursor: pointer; margin-bottom: -1px; }
-.gdw-tabs button.is-on { color: var(--app-text-primary); border-bottom-color: var(--app-accent); font-weight: 600; }
-
-.gdw-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
-.gdw-grow { flex: 1; }
-.gdw input, .gdw select {
-    background: var(--app-input-bg); color: var(--app-text-primary); border: 1px solid var(--app-border);
-    border-radius: 6px; padding: 0.4rem 0.55rem; font: inherit; min-width: 0;
+.gdw th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--app-text-muted);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--app-border, rgba(255,255,255,0.1));
+  white-space: nowrap;
 }
+.gdw td {
+  padding: 10px;
+  border-bottom: 1px dashed var(--app-border-light, var(--app-border));
+  vertical-align: top;
+  font-size: 12.5px;
+}
+.gdw tr:last-child td { border-bottom: 0; }
+.gdw td small { display: block; font-size: 11px; color: var(--app-text-muted); word-break: break-all; margin-top: 2px; }
+.gdw-empty { color: var(--app-text-muted); text-align: center; padding: 24px 8px !important; font-size: 12.5px; list-style: none; }
+.gdw-tag {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  color: var(--app-text-secondary, var(--app-text-primary));
+  white-space: nowrap;
+}
+.gdw-tag.ok { color: var(--gdw-ok); background: color-mix(in srgb, var(--gdw-ok) 12%, transparent); border-color: color-mix(in srgb, var(--gdw-ok) 40%, transparent); }
+.gdw-tag.fail { color: var(--gdw-fail); background: color-mix(in srgb, var(--gdw-fail) 12%, transparent); border-color: color-mix(in srgb, var(--gdw-fail) 40%, transparent); }
+.gdw-tag.wait { color: var(--gdw-wait); background: color-mix(in srgb, var(--gdw-wait) 12%, transparent); border-color: color-mix(in srgb, var(--gdw-wait) 40%, transparent); }
+.gdw-err { color: var(--gdw-fail) !important; }
+
+/* ---------- 탭 = 필터 칩 (plugin_board pb-filter-btn) ---------- */
+.gdw-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 18px 0 12px; }
+.gdw-chip {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-family: inherit;
+  background: var(--app-bg-card);
+  color: var(--app-text-secondary, var(--app-text-primary));
+  border: 1px solid var(--app-border, rgba(255,255,255,0.1));
+  padding: 7px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.gdw-chip:hover { background: var(--app-bg-card-hover); }
+.gdw-chip.is-on {
+  background: color-mix(in srgb, var(--app-accent) 20%, var(--app-bg-card) 80%);
+  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+  color: var(--app-accent);
+}
+
+.gdw-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
 .gdw-toolbar input[type=search] { flex: 1 1 220px; max-width: 360px; }
+.gdw-grow { flex: 1; }
 
-/* 변경 기록 */
-.gdw-events { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--app-border-light); }
-.gdw-ev { border-bottom: 1px solid var(--app-border-light); }
-.gdw-ev-row { display: grid; grid-template-columns: 22px 7rem 3.5rem minmax(0, 1fr) auto; gap: 0.6rem; align-items: center; padding: 0.55rem 0.3rem; cursor: pointer; }
+/* ---------- 변경 기록 ---------- */
+.gdw-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--app-bg-card);
+  border: 1px solid var(--app-border, rgba(255,255,255,0.1));
+  border-radius: 10px;
+  overflow: hidden;
+}
+.gdw-ev { border-bottom: 1px dashed var(--app-border-light, var(--app-border)); }
+.gdw-ev:last-child { border-bottom: 0; }
+.gdw-ev-row {
+  display: grid;
+  grid-template-columns: 20px 6.8rem 3.6rem minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 16px;
+  cursor: pointer;
+  transition: background .15s ease;
+}
 .gdw-ev-row:hover { background: var(--app-bg-card-hover); }
-.gdw-ev-time { color: var(--app-text-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.gdw-ev-row > .gdw-tag { justify-self: start; }
+.gdw-ev-time { color: var(--app-text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .gdw-ev-path { min-width: 0; }
-.gdw-ev-path div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gdw-ev-path .from { color: var(--app-text-muted); font-size: 0.8rem; text-decoration: line-through; }
-.gdw-ev-path .root { color: var(--app-text-muted); font-size: 0.78rem; }
+.gdw-ev-path > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.gdw-ev-path .from { color: var(--app-text-muted); font-size: 11px; text-decoration: line-through; }
+.gdw-ev-path .root { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--app-text-muted); font-size: 11px; margin-top: 2px; }
+.gdw-lib {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  color: var(--app-text-secondary, var(--app-text-primary));
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gdw-lib.ok { color: var(--gdw-ok); border-color: color-mix(in srgb, var(--gdw-ok) 45%, transparent); background: color-mix(in srgb, var(--gdw-ok) 10%, transparent); }
+.gdw-lib.ok::before { content: "→ "; }
+.gdw-lib.fail { color: var(--gdw-fail); border-color: color-mix(in srgb, var(--gdw-fail) 45%, transparent); }
 
-/* 파이프라인: 감지 ─ VFS ─ 스캔 */
-.gdw-pipe { display: flex; align-items: center; gap: 0; white-space: nowrap; }
+/* 처리 단계 점: 감지 ─ VFS ─ 스캔 */
+.gdw-pipe { display: flex; align-items: center; white-space: nowrap; }
 .gdw-pipe i { width: 9px; height: 9px; border-radius: 50%; background: var(--app-border); display: inline-block; }
 .gdw-pipe i + i { margin-left: 16px; position: relative; }
 .gdw-pipe i + i::before { content: ""; position: absolute; right: 9px; top: 4px; width: 16px; height: 1px; background: var(--app-border); }
@@ -99,94 +395,154 @@
 .gdw-pipe i.fail { background: var(--gdw-fail); }
 .gdw-pipe i.wait { background: var(--gdw-wait); }
 .gdw-pipe i.none { background: transparent; border: 1px solid var(--app-border); width: 7px; height: 7px; }
-.gdw-pipe em { font-style: normal; margin-left: 0.6rem; font-size: 0.8rem; color: var(--app-text-secondary); min-width: 4.5rem; }
+.gdw-pipe em { font-style: normal; margin-left: 10px; font-size: 11.5px; font-weight: 600; color: var(--app-text-secondary); min-width: 4.8rem; }
 
-.gdw-ev-detail { padding: 0.2rem 0.6rem 0.9rem 2.2rem; font-size: 0.84rem; }
-.gdw-ev-detail h4 { margin: 0.6rem 0 0.25rem; font-size: 0.8rem; color: var(--app-text-muted); font-weight: 600; }
+.gdw-ev-detail {
+  margin: 0 16px 12px 46px;
+  padding: 10px 14px;
+  background: var(--app-bg-main);
+  border: 1px solid var(--app-border-light, var(--app-border));
+  border-radius: 8px;
+  font-size: 12px;
+}
+.gdw-ev-detail h4 { margin: 10px 0 4px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--app-text-muted); font-weight: 600; }
 .gdw-ev-detail ul { margin: 0; padding: 0; list-style: none; }
-.gdw-ev-detail li { padding: 0.15rem 0; word-break: break-all; }
-.gdw-ev-detail li::before { content: "●"; margin-right: 0.4rem; font-size: 0.7em; color: var(--app-border); }
+.gdw-ev-detail li { padding: 2px 0; word-break: break-all; color: var(--app-text-secondary, var(--app-text-primary)); }
+.gdw-ev-detail li::before { content: "●"; margin-right: 6px; font-size: 0.7em; color: var(--app-border); }
 .gdw-ev-detail li.ok::before { color: var(--gdw-ok); }
 .gdw-ev-detail li.fail::before { color: var(--gdw-fail); }
-.gdw-ev-detail .msg { color: var(--gdw-fail); }
+.gdw-ev-detail .msg { color: var(--gdw-fail); margin-top: 4px; }
+.gdw-ev-detail .msg.wait { color: var(--gdw-wait); }
 
-.gdw-pager { display: flex; justify-content: center; align-items: center; gap: 0.75rem; margin-top: 0.9rem; color: var(--app-text-muted); }
+.gdw-pager { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 14px; font-size: 11.5px; color: var(--app-text-muted); }
 
-/* 설정 */
-.gdw-pane h3 { margin: 1.6rem 0 0.2rem; font-size: 1rem; }
-.gdw-pane h3:first-of-type { margin-top: 0.4rem; }
-.gdw-help, .gdw-note { margin: 0 0 0.6rem; color: var(--app-text-muted); font-size: 0.84rem; max-width: 72ch; }
-.gdw-rows { display: grid; gap: 0.5rem; margin-bottom: 0.5rem; }
-.gdw-row { display: grid; gap: 0.45rem; align-items: end; padding: 0.6rem; border: 1px solid var(--app-border-light); border-radius: 6px; background: var(--app-bg-card); }
-.gdw-row.root { grid-template-columns: 1fr 8.5rem 1.2fr 1.6fr 2fr auto auto auto auto; }
-.gdw-row.vfs { grid-template-columns: 2fr 2fr 1.4fr 1fr auto; }
-.gdw-row label, .gdw-opts label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.76rem; color: var(--app-text-muted); }
-.gdw-row .check { flex-direction: row; align-items: center; gap: 0.3rem; padding-bottom: 0.45rem; white-space: nowrap; }
-.gdw-row .del { background: none; border: 0; color: var(--app-text-muted); cursor: pointer; font-size: 1.1rem; padding: 0.3rem 0.4rem; }
-.gdw-row .del:hover { color: var(--gdw-fail); }
-.gdw-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.6rem; max-width: 760px; }
-.gdw-opts .gdw-wide { grid-column: 1 / -1; }
-.gdw-libs { margin: 0.8rem 0; font-size: 0.84rem; }
-.gdw-libs summary { cursor: pointer; color: var(--app-text-secondary); }
-.gdw-libs ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
-.gdw-libs li { margin: 0.2rem 0; word-break: break-all; }
-.gdw-libs button { margin-left: 0.4rem; font-size: 0.75rem; padding: 0.1rem 0.45rem; }
-.gdw-save { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.2rem; color: var(--app-text-muted); }
-.gdw-preview { display: flex; gap: 0.5rem; max-width: 760px; }
-.gdw-preview input { flex: 1; }
-.gdw-pre { background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 6px; padding: 0.75rem; overflow-x: auto; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; margin: 0.6rem 0 0; }
-.gdw-log { max-height: 60vh; overflow: auto; white-space: pre; }
-
-.gdw-toast { position: fixed; right: 1.5rem; bottom: 1.5rem; background: var(--app-bg-card); border: 1px solid var(--app-border); border-left: 3px solid var(--app-accent); border-radius: 6px; padding: 0.7rem 1rem; box-shadow: var(--app-shadow, 0 6px 18px rgba(0, 0, 0, 0.2)); z-index: 50; max-width: 420px; }
-.gdw-toast.is-error { border-left-color: var(--gdw-fail); }
-
-@media (max-width: 900px) {
-    .gdw-row.root, .gdw-row.vfs { grid-template-columns: 1fr 1fr; }
-    .gdw-ev-row { grid-template-columns: 22px minmax(0, 1fr) auto; }
-    .gdw-ev-time, .gdw-ev-row > .gdw-tag { display: none; }
-    .gdw-roots th:nth-child(4), .gdw-roots td:nth-child(4) { display: none; }
+/* ---------- 설정 ---------- */
+.gdw-rows { display: grid; gap: 8px; }
+.gdw-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: flex-end;
+  padding: 12px;
+  background: var(--app-bg-main);
+  border: 1px solid var(--app-border-light, var(--app-border));
+  border-radius: 8px;
 }
-.gdw-ev-row > .gdw-tag { justify-self: start; }
+.gdw-row > label { flex: 1 1 150px; min-width: 0; }
+.gdw-row > label:first-child { flex: 0 1 140px; }
+.gdw-row > label.check { flex: 0 0 auto; }
+.gdw-row > span:empty { display: none; }
+.gdw-row.root > label:nth-child(2) { flex: 0 0 150px; }
+.gdw-row.root:not(.is-local) > label:nth-child(5), .gdw-row.root.is-local > label:nth-child(5) { flex: 2 1 220px; }
+.gdw-row.root.is-local > label:nth-child(3) { flex: 0 0 170px; }
+.gdw-row.root.is-local > label:nth-child(4) { flex: 0 0 110px; }
+.gdw-row .gdw-checks { flex-basis: 100%; }
+.gdw-row select { width: 100%; }
+.gdw-row label, .gdw-opts label { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--app-text-muted); }
+.gdw-row label.check, .gdw-check { flex-direction: row !important; align-items: center; gap: 6px !important; font-size: 12px !important; font-weight: 500 !important; color: var(--app-text-secondary, var(--app-text-primary)) !important; white-space: nowrap; padding-bottom: 8px; }
+.gdw-opts .gdw-check { grid-column: 1 / -1; padding-bottom: 0; white-space: normal; }
+.gdw-row .del { background: none; border: 0; color: var(--app-text-muted); cursor: pointer; font-size: 16px; padding: 6px; line-height: 1; }
+.gdw-row .del:hover { color: var(--gdw-fail); }
+.gdw-check-btn { margin-bottom: 4px; }
+.gdw-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px 12px; }
+.gdw-opts .gdw-wide { grid-column: 1 / -1; }
+.gdw-env { max-width: 780px; }
+.gdw small { font-weight: 400; color: var(--app-text-muted); }
 
-.gdw-env { max-width: 760px; }
-.gdw-check { flex-direction: row !important; align-items: center; gap: 0.45rem !important; grid-column: 1 / -1; font-size: 0.85rem !important; color: var(--app-text-primary) !important; }
-.gdw-rclone { margin-top: 0.8rem; max-width: 900px; font-size: 0.84rem; }
-.gdw-rclone p { margin: 0 0 0.4rem; color: var(--app-text-muted); word-break: break-all; }
-.gdw-rclone td { padding: 0.35rem 0.6rem; }
-.gdw-rclone .bad { color: var(--gdw-fail); }
-
-.gdw-vfsmap { max-height: 420px; overflow: auto; border: 1px solid var(--app-border-light); border-radius: 6px; }
-.gdw-vfsmap td { font-size: 0.82rem; word-break: break-all; }
-.gdw-vfsmap td.pending { color: var(--app-text-muted); }
-.gdw-vfsmap td.none { color: var(--app-text-muted); font-style: italic; }
-.gdw-vfsmap button { font-size: 0.75rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
-
-.gdw-check-btn { padding: 0.3rem 0.7rem; margin-bottom: 0.1rem; }
-.gdw-checks { grid-column: 1 / -1; display: grid; gap: 0.25rem; padding: 0.5rem 0.2rem 0.1rem; border-top: 1px dashed var(--app-border-light); font-size: 0.84rem; }
-.gdw-checkline { display: grid; grid-template-columns: 8.5rem 1fr; gap: 0.6rem; }
+.gdw-checks {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--app-border-light, var(--app-border));
+  font-size: 12px;
+}
+.gdw-checkline { display: grid; grid-template-columns: 9rem 1fr; gap: 10px; }
 .gdw-checkline b { font-weight: 600; }
-.gdw-checkline b::before { content: "●"; margin-right: 0.4rem; font-size: 0.75em; color: var(--app-border); }
+.gdw-checkline b::before { content: "●"; margin-right: 6px; font-size: 0.75em; color: var(--app-border); }
 .gdw-checkline.ok b::before { color: var(--gdw-ok); }
 .gdw-checkline.fail b::before { color: var(--gdw-fail); }
 .gdw-checkline.warn b::before { color: var(--gdw-wait); }
 .gdw-checkline.fail span { color: var(--gdw-fail); }
-.gdw-muted { color: var(--app-text-muted); }
-@media (max-width: 900px) { .gdw-checkline { grid-template-columns: 1fr; gap: 0; } }
 
-.gdw-row.root.is-local { grid-template-columns: 1fr 7.5rem 9rem 6rem 3fr 0 auto auto auto; }
+.gdw-rclone { margin-top: 14px; font-size: 12px; }
+.gdw-rclone p { margin: 0 0 8px; color: var(--app-text-muted); word-break: break-all; }
+.gdw-rclone .bad { color: var(--gdw-fail); }
+.gdw-rclone .dim, .gdw-vfsmap td.none, .gdw-vfsmap td.pending { color: var(--app-text-muted); }
+.gdw-vfsmap { max-height: 420px; overflow: auto; border: 1px solid var(--app-border-light, var(--app-border)); border-radius: 8px; }
+.gdw-vfsmap td { word-break: break-all; font-size: 12px; }
+.gdw-vfsmap td.none { font-style: italic; }
 
-.gdw-rclone .dim { color: var(--app-text-muted); }
+/* 접이식 (plugin_board pb-token-help) */
+.gdw-details {
+  margin-top: 14px;
+  border: 1px solid var(--app-border, rgba(255,255,255,0.1));
+  border-radius: 10px;
+  padding: 2px 16px;
+  background: var(--app-bg-main);
+}
+.gdw-details[open] { padding-bottom: 14px; }
+.gdw-details summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 0;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--app-text-secondary, var(--app-text-primary));
+}
+.gdw-details summary::-webkit-details-marker { display: none; }
+.gdw-details summary::after {
+  content: "";
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--app-text-muted);
+  border-bottom: 1.5px solid var(--app-text-muted);
+  transform: rotate(45deg);
+  transition: transform .15s ease;
+  flex-shrink: 0;
+}
+.gdw-details[open] summary::after { transform: rotate(-135deg); }
+.gdw-details-body { border-top: 1px dashed var(--app-border-light, var(--app-border)); padding-top: 4px; }
+.gdw-textarea { display: block; width: 100%; max-width: 780px; box-sizing: border-box; margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; resize: vertical; }
 
-.gdw-textarea { width: 100%; max-width: 760px; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem;
-    background: var(--app-input-bg); color: var(--app-text-primary); border: 1px solid var(--app-border); border-radius: 6px; padding: 0.5rem 0.6rem; resize: vertical; }
+.gdw-pre {
+  background: var(--app-bg-main);
+  border: 1px solid var(--app-border, rgba(255,255,255,0.12));
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 12px 0 0;
+}
+.gdw-log { max-height: 62vh; overflow: auto; white-space: pre; margin: 0; }
 
-.gdw-ev-path .root { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
-.gdw-lib { display: inline-block; font-size: 0.74rem; padding: 0 0.45rem; border-radius: 999px; border: 1px solid var(--app-border);
-    color: var(--app-text-secondary); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.gdw-lib.ok { border-color: var(--gdw-ok); color: var(--gdw-ok); }
-.gdw-lib.ok::before { content: "→ "; }
-.gdw-lib.fail { border-color: var(--gdw-fail); color: var(--gdw-fail); }
+.gdw-toast {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  z-index: 50;
+  max-width: 440px;
+  background: var(--app-bg-card);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 45%, transparent);
+  border-radius: 10px;
+  padding: 11px 16px;
+  font-size: 12.5px;
+  box-shadow: var(--app-shadow, 0 10px 24px rgba(0,0,0,0.25));
+}
+.gdw-toast.is-error { border-color: color-mix(in srgb, var(--gdw-fail) 55%, transparent); }
 
-.gdw-manual { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
-.gdw-manual input { flex: 1 1 320px; }
-.gdw-ev-detail .msg.wait { color: var(--gdw-wait); }
+/* ---------- 좁은 화면 ---------- */
+@media (max-width: 900px) {
+  .gdw-title { padding-right: 0; }
+  .gdw-header-actions { position: static; justify-content: flex-start; margin-bottom: 12px; }
+  .gdw-ev-row { grid-template-columns: 20px minmax(0, 1fr) auto; }
+  .gdw-ev-time, .gdw-ev-row > .gdw-tag { display: none; }
+  .gdw-roots th:nth-child(4), .gdw-roots td:nth-child(4) { display: none; }
+  .gdw-ev-detail { margin-left: 16px; }
+  .gdw-checkline { grid-template-columns: 1fr; gap: 0; }
+}

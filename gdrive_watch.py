@@ -167,6 +167,14 @@ def _verify_token(base_url, token):
         return False, f"BookOasis 연결 실패 ({base_url}): {error.reason}"
 
 
+def _plugin_version():
+    try:
+        with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as handle:
+            return str(json.load(handle).get("plugin version") or "")
+    except (OSError, ValueError):
+        return ""
+
+
 def _load_worker_module():
     spec = importlib.util.spec_from_file_location("gdrive_watch_worker", WORKER_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -374,7 +382,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
                                              "last_process": beat.get("last_process"),
                                              "error": beat.get("error"), "stopped_by_user": os.path.exists(_path("disabled.flag"))},
                 "counts": counts, "today": today_counts, "roots": roots, "warnings": warnings,
-                "libraries": len(runtime.get("libraries") or []), "auto_start": runtime.get("auto_start")}
+                "libraries": len(runtime.get("libraries") or []), "auto_start": runtime.get("auto_start"),
+                "version": _plugin_version()}
 
     def _rpc_start(self, ctx):
         self._clear_disabled()
