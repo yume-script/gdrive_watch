@@ -1174,3 +1174,14 @@
   outline-offset: -2px;
   background: color-mix(in srgb, var(--app-accent) 18%, transparent);
 }
+
+/* 감시 폴더 패널 접기/펼치기 */
+.gdw-collapse-head { cursor: pointer; user-select: none; border-radius: 8px; margin: -6px -8px 12px; padding: 6px 8px; transition: background .15s ease; }
+.gdw-collapse-head:hover { background: var(--app-bg-card-hover); }
+.gdw-collapse-right { display: flex; align-items: center; gap: 10px; }
+.gdw-chevron { width: 8px; height: 8px; border-right: 1.5px solid var(--app-text-muted); border-bottom: 1.5px solid var(--app-text-muted);
+  transform: rotate(-135deg); transition: transform .15s ease; margin-top: 3px; }
+.gdw-panel.is-collapsed .gdw-chevron { transform: rotate(45deg); margin-top: -3px; }
+.gdw-panel.is-collapsed .gdw-collapse-head { margin-bottom: -6px; }
+.gdw-panel.is-collapsed .gdw-table-wrap { display: none; }
+.gdw-badge.has-error { color: var(--gdw-fail); background: color-mix(in srgb, var(--gdw-fail) 14%, transparent); border-color: color-mix(in srgb, var(--gdw-fail) 40%, transparent); }

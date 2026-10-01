@@ -78,7 +78,10 @@
         bind('toggle').textContent = w.alive ? '중지' : '시작';
         var ver = bind('version');
         if (d.version) { ver.textContent = 'v' + d.version; ver.hidden = false; } else { ver.hidden = true; }
-        bind('roots-badge').textContent = (d.roots || []).length + '개';
+        var errs = (d.roots || []).filter(function (r) { return r.enabled && (r.status === 'error' || r.status === 'blocked'); }).length;
+        var badge = bind('roots-badge');
+        badge.textContent = (d.roots || []).length + '개' + (errs ? ' · 오류 ' + errs : '');
+        badge.classList.toggle('has-error', errs > 0);
 
         var warn = clear(bind('warnings'));
         (d.warnings || []).forEach(function (m) { warn.appendChild(el('li', { text: m })); });
@@ -545,6 +548,7 @@
                 }).catch(function (err) { out.textContent = err.message; out.hidden = false; });
             }
             else if (a === 'log') loadLog();
+            else if (a === 'toggle_roots') setRootsCollapsed(!bind('roots-panel').classList.contains('is-collapsed'), true);
             else if (a === 'check_rclone') checkRclone(false);
             else if (a === 'manual_create' || a === 'manual_delete') {
                 var mp = bind('manual-path').value.trim();
@@ -580,6 +584,16 @@
     var qTimer;
     bind('f-q').addEventListener('input', function () { var v = this.value; clearTimeout(qTimer); qTimer = setTimeout(function () { st.q = v.trim(); st.page = 1; loadEvents(); }, 300); });
 
+    function setRootsCollapsed(collapsed, remember) {
+        var panel = bind('roots-panel');
+        panel.classList.toggle('is-collapsed', collapsed);
+        panel.querySelector('.gdw-collapse-head').setAttribute('aria-expanded', String(!collapsed));
+        if (remember) { try { localStorage.setItem('gdw_roots_collapsed', collapsed ? '1' : '0'); } catch (e) { /* 저장 불가 무시 */ } }
+    }
+    try { setRootsCollapsed(localStorage.getItem('gdw_roots_collapsed') === '1', false); } catch (e) { /* 무시 */ }
+    app.querySelector('.gdw-collapse-head').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRootsCollapsed(!bind('roots-panel').classList.contains('is-collapsed'), true); }
+    });
     function switchTab(name) {
         st.tab = name;
         $$('[data-tab]').forEach(function (b) { b.classList.toggle('is-on', b.getAttribute('data-tab') === name); b.setAttribute('aria-selected', b.getAttribute('data-tab') === name); });
