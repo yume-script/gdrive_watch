@@ -1049,7 +1049,7 @@ class ActivityWatcher(Watcher):
 
 # ─────────────────────────── Drive 폴더 비교 ───────────────────────────
 # 변경 목록을 쓸 수 없는 경우(공유 드라이브 멤버가 아니라 폴더만 공유받은 계정 등)를 위한 방식.
-# 정해진 주기마다 감시 폴더 트리를 Drive API로 훑어(폴더 50개씩 묶고, 4개를 동시에 조회) 이전 목록과 비교한다.
+# 정해진 주기마다 감시 폴더 트리를 Drive API로 훑어(폴더 50개씩 묶어 여러 개를 동시에 조회) 이전 목록과 비교한다.
 # 훑는 작업은 감시 폴더마다 별도 스레드에서 돌아서, 크고 느린 폴더가 다른 폴더의 감시를 막지 않는다.
 
 POLL_FIELDS = "nextPageToken,files(id,name,mimeType,parents,size,md5Checksum,modifiedTime,shortcutDetails(targetId,targetMimeType))"
@@ -1061,6 +1061,7 @@ class DrivePollWatcher(Watcher):
     def __init__(self, cfg, store, rclone, extensions, buffer_seconds, api_timeout):
         super().__init__(cfg, store, rclone, extensions, buffer_seconds, api_timeout)
         self.interval = max(120, int(cfg.get("drive_interval") or 600))
+        self.workers = 4  # 동시 조회 수 (처리 옵션에서 설정)
         self.thread = None
         self.next_sweep = 0.0
         self.progress = {"folders": 0, "items": 0, "started": 0.0}
@@ -1115,7 +1116,7 @@ class DrivePollWatcher(Watcher):
                     break
             return out
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
             while level and not STOP:
                 batches = [level[i:i + 50] for i in range(0, len(level), 50)]
                 level = []
@@ -2197,6 +2198,8 @@ class Worker:
                 cls = DrivePollWatcher if drivepoll else ActivityWatcher if activity else ChangesWatcher
                 watcher = cls(root, self.store, rclone, extensions, buffer_seconds, int(cfg.get("api_timeout", 60)))
                 watcher.user_feed = fallback == "userfeed"
+                if isinstance(watcher, DrivePollWatcher):
+                    watcher.workers = min(16, max(1, int(cfg.get("drive_workers", 4) or 4)))
                 watcher.verbose = bool(cfg.get("verbose_log"))
                 watchers.append(watcher)
             except Exception as error:
@@ -2282,6 +2285,7 @@ class Worker:
                     replacement = DrivePollWatcher(dict(watcher.cfg, mode="drivepoll"), self.store, watcher.rclone,
                                                    watcher.extensions, watcher.buffer_seconds, watcher.api.timeout)
                     replacement.verbose = watcher.verbose
+                    replacement.workers = min(16, max(1, int(self.cfg.get("drive_workers", 4) or 4)))
                     self.watchers[self.watchers.index(watcher)] = replacement
                     message = (f"[{watcher.name}] 이 계정은 공유 드라이브 멤버가 아니라 변경 목록을 받을 수 없어, "
                                "폴더 비교 방식으로 전환했습니다.")

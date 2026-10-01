@@ -382,7 +382,10 @@
             cells.push(checkbox(r, 'enabled', '사용', true),
                 el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '점검', title: '이 설정으로 실제 감시가 되는지 점검',
                     onclick: function (e) { checkRoot(r, e.target); } }),
-                local ? null : el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '변경 목록 시험',
+                (!local && r.mode === 'drivepoll') ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '빠른 확인 시험',
+                    title: 'Drive 검색으로 새로 생긴 파일을 바로 찾을 수 있는지 시험합니다 (시작 → 파일 업로드 → 결과 확인)',
+                    onclick: function (e) { quickProbe(r, e.target); } }) : null,
+                (local || r.mode === 'drivepoll') ? null : el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '변경 목록 시험',
                     title: '지금부터 Drive 변경 목록에 무엇이 들어오는지 직접 확인합니다 (시작 → 파일 업로드 → 결과 확인)',
                     onclick: function (e) { probeRoot(r, e.target); } }),
                 el('button', { type: 'button', class: 'del', title: '삭제', 'aria-label': '삭제', text: '×', onclick: function () { st.watch.roots.splice(idx, 1); renderRoots(); } }),
@@ -427,6 +430,31 @@
                     (x.removed ? '[삭제] ' : '') + x.name));
             });
             btn.textContent = '변경 목록 시험'; btn.removeAttribute('data-probing');
+        }).catch(function (e) { box.appendChild(line('fail', '결과', e.message)); })
+          .then(function () { btn.disabled = false; });
+    }
+    function quickProbe(r, btn) {
+        var box = btn.parentNode.querySelector('.gdw-checks');
+        box.hidden = false;
+        var line = function (cls, label, text) { return el('div', { class: 'gdw-checkline ' + cls }, [el('b', { text: label }), el('span', { text: text })]); };
+        btn.disabled = true;
+        if (btn.getAttribute('data-probing') !== '1') {
+            rpc('quick_probe_start', { root: r }).then(function (d) {
+                clear(box).appendChild(line('warn', '빠른 확인 시험', d.message));
+                btn.textContent = '결과 확인'; btn.setAttribute('data-probing', '1');
+            }).catch(function (e) { clear(box).appendChild(line('fail', '빠른 확인 시험', e.message)); })
+              .then(function () { btn.disabled = false; });
+            return;
+        }
+        rpc('quick_probe_check', { root: r }).then(function (d) {
+            clear(box).appendChild(line(d.ok ? 'ok' : 'fail', '결과', d.verdict));
+            (d.results || []).forEach(function (x) {
+                if (x.error) { box.appendChild(line('fail', '검색 ' + x.corpora, x.error)); return; }
+                box.appendChild(line(x.hit_count ? 'ok' : '', '검색 ' + x.corpora,
+                    '결과 ' + x.total + (x.more ? '건 이상' : '건') + ' · ' + x.seconds + '초 · 감시 폴더 안 ' + x.hit_count + '건' +
+                    (x.hits && x.hits.length ? ' (' + x.hits.join(', ') + ')' : '')));
+            });
+            btn.textContent = '빠른 확인 시험'; btn.removeAttribute('data-probing');
         }).catch(function (e) { box.appendChild(line('fail', '결과', e.message)); })
           .then(function () { btn.disabled = false; });
     }

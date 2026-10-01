@@ -206,6 +206,7 @@ DEFAULT_WATCH = {
     "verbose_log": False,
     "file_wait_minutes": 10,
     "full_scan_guard_minutes": 10,
+    "drive_workers": 4,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -698,6 +699,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "verbose_log": bool(watch.get("verbose_log")),
             "file_wait_minutes": max(0, int(watch.get("file_wait_minutes", 10) or 0)),
             "full_scan_guard_minutes": max(0, int(watch.get("full_scan_guard_minutes", 10) or 0)),
+            "drive_workers": min(16, max(1, int(watch.get("drive_workers", 4) or 4))),
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),
@@ -851,6 +853,80 @@ class GDriveWatchProvider(BaseMetadataProvider):
                        "이 계정의 변경 목록으로는 그 폴더의 변경을 받을 수 없습니다.")
         return {"success": True, "verdict": verdict, "total": len(changes), "rows": rows[-30:],
                 "feed": probe["drive"] or "계정 전체"}
+
+    def _rpc_quick_probe_start(self, ctx):
+        """빠른 확인 시험 1단계: 지금 시각을 기준점으로 기록한다 (Drive 검색으로 이후 생긴·바뀐 파일을 찾을 수 있는지 시험)."""
+        root = ctx.get("root") or {}
+        try:
+            self._probe_api(root)  # 리모트·폴더 접근 확인
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+        probes = _read_json("quick_probe.json", {}) or {}
+        probes[root.get("name") or "_"] = {"since": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 5)), "ts": time.time()}
+        _write_json("quick_probe.json", probes)
+        return {"success": True, "message": "시험 시작. 이제 감시 폴더 안(하위 폴더도 됨)에 파일을 하나 올리고, 1~2분 뒤 [결과 확인]을 누르세요."}
+
+    def _rpc_quick_probe_check(self, ctx):
+        """빠른 확인 시험 2단계: 기준 시각 이후 생기거나 수정된 파일을 Drive 검색으로 찾고, 감시 폴더 안 항목이 나오는지 본다.
+        검색 범위(corpora)를 allDrives와 user 두 가지로 모두 시험해 어느 쪽이 쓸 만한지 알려 준다."""
+        root = ctx.get("root") or {}
+        probe = (_read_json("quick_probe.json", {}) or {}).get(root.get("name") or "_")
+        if not probe:
+            return {"success": False, "error": "먼저 [빠른 확인 시험]을 눌러 시작하세요."}
+        try:
+            worker, api, data, drive_id = self._probe_api(root)
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+        root_id, cache = data.get("id"), {}
+
+        def inside(file_data, depth=0):
+            parents = file_data.get("parents") or []
+            if not parents or depth > 30:
+                return False
+            if root_id in parents:
+                return True
+            pid = parents[0]
+            if pid not in cache:
+                try:
+                    cache[pid] = api.file(pid) or {}
+                except Exception:
+                    cache[pid] = {}
+            return inside(cache[pid], depth + 1) if cache[pid] else False
+
+        since = probe["since"]
+        q = f"(createdTime > '{since}' or modifiedTime > '{since}') and trashed = false"
+        results = []
+        for corpora in ("allDrives", "user"):
+            started = time.time()
+            try:
+                files, page, pages = [], None, 0
+                while pages < 5:
+                    params = {"q": q, "corpora": corpora, "pageSize": 1000, "orderBy": "modifiedTime desc",
+                              "fields": "nextPageToken,files(id,name,parents,mimeType,createdTime,modifiedTime)"}
+                    if corpora == "allDrives":
+                        params["includeItemsFromAllDrives"] = "true"
+                    if page:
+                        params["pageToken"] = page
+                    data_page = api.get("files", **params)
+                    files += data_page.get("files") or []
+                    page, pages = data_page.get("nextPageToken"), pages + 1
+                    if not page:
+                        break
+                hits = [f for f in files[:300] if inside(f)]
+                results.append({"corpora": corpora, "total": len(files), "more": bool(page), "seconds": round(time.time() - started, 1),
+                                "hits": [f.get("name") for f in hits][:20], "hit_count": len(hits)})
+            except Exception as error:
+                results.append({"corpora": corpora, "error": str(error)})
+        good = [r for r in results if r.get("hit_count")]
+        minutes = int((time.time() - probe["ts"]) / 60)
+        if good:
+            best = min(good, key=lambda r: r["total"])
+            verdict = (f"빠른 확인을 쓸 수 있습니다: 검색 범위 '{best['corpora']}'에서 감시 폴더 안 항목 {best['hit_count']}건을 찾았습니다 "
+                       f"(검색 결과 전체 {best['total']}건, {best['seconds']}초). 결과가 적을수록 1분 간격 확인에 부담이 없습니다.")
+        else:
+            verdict = (f"{minutes}분 동안의 검색 결과에서 감시 폴더 안 항목을 찾지 못했습니다. 파일을 올렸는데도 없다면 "
+                       "이 계정으로는 검색 방식의 빠른 확인을 쓸 수 없고, 폴더 비교만으로 감시해야 합니다.")
+        return {"success": True, "verdict": verdict, "ok": bool(good), "results": results, "since": since}
 
     def _rpc_check_root(self, ctx):
         """감시 폴더 설정 점검 (저장 전 값으로도 가능): 토큰 → Drive 폴더 → 드라이브 일치 → 로컬 경로 → 보관함/VFS."""
