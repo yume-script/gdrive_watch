@@ -188,6 +188,10 @@ def _db():
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=30000")
     db.executescript(_load_worker_module().SCHEMA)
+    try:
+        db.execute("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     return db
 
 
@@ -201,7 +205,7 @@ DEFAULT_WATCH = {
     "extensions": "",
     "verbose_log": False,
     "file_wait_minutes": 10,
-    "full_scan_guard_minutes": 30,
+    "full_scan_guard_minutes": 10,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -364,6 +368,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 "items": items, "last_event": last["created"] if last else "",
                 "stat": dict(stat) if stat else None,
             })
+        oldest = db.execute("SELECT MIN(created) FROM event WHERE status IN ('pending','waiting')").fetchone()[0]
         token_fail = db.execute("SELECT COUNT(*) FROM event WHERE status IN ('failed','pending') AND "
                                 "(message LIKE '%토큰 불일치%' OR message LIKE '%Invalid webhook token%')").fetchone()[0]
         db.close()
@@ -373,6 +378,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
                             "[토큰 확인]을 눌러 보고, 맞춘 뒤 [실패 전부 재시도]를 누르세요.")
         if not runtime.get("roots"):
             warnings.append("감시 루트가 없습니다. [감시 설정] 탭에서 추가하세요.")
+        if oldest and not alive:
+            warnings.append("워커가 멈춰 있어 대기 중인 기록이 처리되지 않습니다. [시작]을 누르세요.")
         if not (runtime.get("webhook_token") or os.environ.get("WEBHOOK_TOKEN")):
             warnings.append("WEBHOOK_TOKEN이 없어 스캔 요청을 보낼 수 없습니다. 플러그인 설정 또는 .env를 확인하세요.")
         if not runtime.get("vfs") and not any(l.get("rclone_rc_url") for l in runtime.get("libraries") or []):
@@ -443,7 +450,6 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 item["result"] = json.loads(item.get("result") or "{}")
             except ValueError:
                 item["result"] = {}
-            item.pop("ready_at", None)
             items.append(item)
         return {"success": True, "items": items, "total": total, "page": page, "size": size}
 
@@ -451,12 +457,12 @@ class GDriveWatchProvider(BaseMetadataProvider):
         db = _db()
         with db:
             if ctx.get("all_failed"):
-                n = db.execute("UPDATE event SET status='pending', attempts=0, ready_at=0, created=? "
+                n = db.execute("UPDATE event SET status='pending', attempts=0, ready_at=0, force=1, created=? "
                                "WHERE status IN ('failed','timeout')", (time.strftime("%Y-%m-%dT%H:%M:%S"),)).rowcount
             else:
                 ids = [int(i) for i in ctx.get("ids") or []]
                 marks = ",".join("?" * len(ids)) or "NULL"
-                n = db.execute(f"UPDATE event SET status='pending', attempts=0, ready_at=0, created=? WHERE id IN ({marks})",
+                n = db.execute(f"UPDATE event SET status='pending', attempts=0, ready_at=0, force=1, created=? WHERE id IN ({marks})",
                                [time.strftime("%Y-%m-%dT%H:%M:%S")] + ids).rowcount
         db.close()
         open(_path("wake.flag"), "w").close()
@@ -690,7 +696,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "extensions": str(watch.get("extensions") or "").strip(),
             "verbose_log": bool(watch.get("verbose_log")),
             "file_wait_minutes": max(0, int(watch.get("file_wait_minutes", 10) or 0)),
-            "full_scan_guard_minutes": max(0, int(watch.get("full_scan_guard_minutes", 30) or 0)),
+            "full_scan_guard_minutes": max(0, int(watch.get("full_scan_guard_minutes", 10) or 0)),
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),

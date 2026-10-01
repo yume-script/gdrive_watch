@@ -395,7 +395,7 @@
 .gdw-pipe i.fail { background: var(--gdw-fail); }
 .gdw-pipe i.wait { background: var(--gdw-wait); }
 .gdw-pipe i.none { background: transparent; border: 1px solid var(--app-border); width: 7px; height: 7px; }
-.gdw-pipe em { font-style: normal; margin-left: 10px; font-size: 11.5px; font-weight: 600; color: var(--app-text-secondary); min-width: 4.8rem; }
+.gdw-pipe em { font-style: normal; margin-left: 10px; font-size: 11.5px; font-weight: 600; color: var(--app-text-secondary); min-width: 4.8rem; max-width: 13rem; white-space: normal; }
 
 .gdw-ev-detail {
   margin: 0 16px 12px 46px;

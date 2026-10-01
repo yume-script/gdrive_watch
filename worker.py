@@ -181,6 +181,10 @@ def open_db(path):
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=30000")
     db.executescript(SCHEMA)
+    try:  # v1.12.1: '선택 재시도'로 강제 처리할 때 전체 스캔 회피를 건너뛰는 표시
+        db.execute("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     return db
 
 
@@ -1634,7 +1638,7 @@ class BookOasis:
         self.token = cfg.get("webhook_token") or os.environ.get("WEBHOOK_TOKEN", "")
         self.timeout = int(cfg.get("scan_timeout", 300))
         self.file_wait = max(0, int(cfg.get("file_wait_minutes", 10)))  # 0이면 확인하지 않음
-        self.guard = max(0, int(cfg.get("full_scan_guard_minutes", 30)))  # 전체 스캔 시간대 회피(분), 0이면 끔
+        self.guard = max(0, int(cfg.get("full_scan_guard_minutes", 10)))  # 전체 스캔 시간대 회피(분), 0이면 끔
         self.crons = {(lib["db_type"], int(lib["id"])): lib.get("cron_schedule") or ""
                       for lib in libraries or [] if lib.get("id") is not None}
         self.libraries = []
@@ -1657,6 +1661,10 @@ class BookOasis:
         if not self.guard or not cron:
             return None
         now = datetime.now().replace(second=0, microsecond=0)
+        # 2시간보다 자주 도는 일정은 회피하지 않는다 (회피 시간대가 겹쳐 부분 스캔이 계속 밀리는 것 방지)
+        fires = sum(1 for back in range(0, 360, 1) if cron_matches(cron, now - timedelta(minutes=back)))
+        if fires > 3:
+            return None
         for back in range(self.guard + 1):
             started = now - timedelta(minutes=back)
             if cron_matches(cron, started):
@@ -1810,7 +1818,8 @@ class BookOasis:
         for d in kept:
             if STOP:
                 break
-            until = self.full_scan_until(self.library_for(d))
+            forced = any(ev.get("force") for ev in events if ev["id"] in wanted[d]["events"])
+            until = None if forced else self.full_scan_until(self.library_for(d))
             if until:
                 wait = max(60, int((until - datetime.now()).total_seconds()))
                 for event_id in wanted[d]["events"]:

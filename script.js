@@ -170,6 +170,11 @@
             var moved = ev.removed_path && ev.removed_path !== ev.path;
             var statusText = STATUS[ev.status] || ev.status;
             if (ev.status === 'pending' && ev.attempts) statusText = '재시도 대기 (' + ev.attempts + '회 실패)';
+            if (ev.status === 'waiting') statusText = /전체 스캔/.test(ev.message || '') ? '전체 스캔 회피' : '파일 확인 대기';
+            if ((ev.status === 'pending' || ev.status === 'waiting') && ev.ready_at) {
+                var left = Math.round(ev.ready_at - Date.now() / 1000);
+                statusText += left > 0 ? ' · ' + (left >= 60 ? Math.ceil(left / 60) + '분 후' : left + '초 후') : ' · 곧 처리';
+            }
             var check = el('input', { type: 'checkbox', 'aria-label': '선택', checked: !!st.picked[ev.id] });
             check.addEventListener('click', function (e) { e.stopPropagation(); if (check.checked) st.picked[ev.id] = 1; else delete st.picked[ev.id]; });
             var pipe = el('span', { class: 'gdw-pipe', title: '감지 → VFS 새로고침 → BookOasis 스캔' }, [
