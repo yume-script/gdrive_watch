@@ -764,6 +764,93 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 "config_file": conf_path, "using_default": not settings["rclone_config"],
                 "modified": modified, "file_mount": _file_bind_mounted(conf_path)}
 
+    def _probe_api(self, root):
+        """감시 폴더 설정으로 Drive API와 변경 목록 기준(드라이브/계정 전체)을 준비한다."""
+        worker = _load_worker_module()
+        settings = self._settings()
+        rclone = worker.Rclone(settings["rclone_path"], settings["rclone_config"], 60)
+        rclone.rc_sources = worker.rc_sources(self._watch().get("vfs"), self._libraries())
+        remote = str(root.get("source_remote") or "").strip().rstrip(":")
+        api = worker.DriveApi(rclone, remote, 30)
+        data = api.file(str(root.get("root_id") or "").strip()) or {}
+        if data.get("mimeType") == worker.SHORTCUT_MIME:
+            data = api.file((data.get("shortcutDetails") or {}).get("targetId", "")) or {}
+        if not data:
+            raise RuntimeError("감시 폴더를 찾을 수 없습니다.")
+        fallback = (_read_json("fallback.json", {}) or {}).get(root.get("name"))
+        drive_id = "" if fallback == "userfeed" else (data.get("driveId") or "")
+        return worker, api, data, drive_id
+
+    def _rpc_feed_probe_start(self, ctx):
+        """변경 목록 시험 1단계: 지금 시점의 체크포인트를 받아 둔다."""
+        root = ctx.get("root") or {}
+        try:
+            worker, api, data, drive_id = self._probe_api(root)
+            params = {"driveId": drive_id} if drive_id else {}
+            token = api.get("changes/startPageToken", **params)["startPageToken"]
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+        probes = _read_json("probe.json", {}) or {}
+        probes[root.get("name") or "_"] = {"token": token, "drive": drive_id, "ts": time.time()}
+        _write_json("probe.json", probes)
+        where = f"공유 드라이브 {drive_id}" if drive_id else "계정 전체"
+        return {"success": True, "message": f"시험 시작 ({where} 변경 목록). 이제 감시 폴더 안에 파일을 하나 올리고, "
+                                            "1~2분 뒤 [결과 확인]을 누르세요."}
+
+    def _rpc_feed_probe_check(self, ctx):
+        """변경 목록 시험 2단계: 시작 이후 변경 목록에 무엇이 들어왔는지 그대로 보여 준다 (감시 상태는 건드리지 않음)."""
+        root = ctx.get("root") or {}
+        probe = (_read_json("probe.json", {}) or {}).get(root.get("name") or "_")
+        if not probe:
+            return {"success": False, "error": "먼저 [변경 목록 시험]을 눌러 시작하세요."}
+        try:
+            worker, api, data, drive_id = self._probe_api(root)
+            params = {"driveId": probe["drive"]} if probe["drive"] else {}
+            token, changes = probe["token"], []
+            while token and len(changes) < 2000:
+                page = api.get("changes", pageToken=token, pageSize=1000, includeRemoved="true",
+                               includeItemsFromAllDrives="true", **params,
+                               fields="nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,trashed,driveId))")
+                changes += page.get("changes") or []
+                token = page.get("nextPageToken")
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+        root_id = data.get("id")
+        cache = {}
+
+        def inside(file_data, depth=0):
+            parents = file_data.get("parents") or []
+            if not parents or depth > 30:
+                return False
+            if root_id in parents:
+                return True
+            pid = parents[0]
+            if pid not in cache:
+                cache[pid] = api.file(pid) or {}
+            return inside(cache[pid], depth + 1) if cache[pid] else False
+
+        rows = []
+        for change in changes[-200:]:
+            f = change.get("file") or {}
+            try:
+                hit = inside(f) if f else None
+            except Exception:
+                hit = None
+            rows.append({"name": f.get("name") or change.get("fileId"), "removed": bool(change.get("removed") or f.get("trashed")),
+                         "inside": hit, "drive": f.get("driveId") or ""})
+        found = [r for r in rows if r["inside"]]
+        minutes = int((time.time() - probe["ts"]) / 60)
+        if found:
+            verdict = f"변경 목록에 감시 폴더 안 항목이 {len(found)}건 들어왔습니다. 변경 목록은 정상이고, 반영이 안 된다면 그 뒤 단계(확장자·무시 패턴·보관함) 문제입니다."
+        elif rows:
+            verdict = (f"{minutes}분 동안 변경 {len(changes)}건이 들어왔지만 감시 폴더 안 항목은 없습니다. "
+                       "올린 파일이 이 목록에 없다면 이 계정의 변경 목록으로는 그 폴더의 변경을 받을 수 없습니다.")
+        else:
+            verdict = (f"{minutes}분 동안 변경 목록이 비어 있습니다. 파일을 올렸는데도 비어 있다면 "
+                       "이 계정의 변경 목록으로는 그 폴더의 변경을 받을 수 없습니다.")
+        return {"success": True, "verdict": verdict, "total": len(changes), "rows": rows[-30:],
+                "feed": probe["drive"] or "계정 전체"}
+
     def _rpc_check_root(self, ctx):
         """감시 폴더 설정 점검 (저장 전 값으로도 가능): 토큰 → Drive 폴더 → 드라이브 일치 → 로컬 경로 → 보관함/VFS."""
         root = ctx.get("root") or {}

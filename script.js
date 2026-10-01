@@ -377,6 +377,9 @@
             cells.push(checkbox(r, 'enabled', '사용', true),
                 el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '점검', title: '이 설정으로 실제 감시가 되는지 점검',
                     onclick: function (e) { checkRoot(r, e.target); } }),
+                local ? null : el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '변경 목록 시험',
+                    title: '지금부터 Drive 변경 목록에 무엇이 들어오는지 직접 확인합니다 (시작 → 파일 업로드 → 결과 확인)',
+                    onclick: function (e) { probeRoot(r, e.target); } }),
                 el('button', { type: 'button', class: 'del', title: '삭제', 'aria-label': '삭제', text: '×', onclick: function () { st.watch.roots.splice(idx, 1); renderRoots(); } }),
                 el('div', { class: 'gdw-checks', 'data-check': idx, hidden: true }));
             box.appendChild(el('div', { class: 'gdw-row root' + (local ? ' is-local' : '') }, cells));
@@ -395,6 +398,31 @@
                 ]));
             });
         }).catch(function (e) { clear(box).appendChild(el('div', { class: 'gdw-checkline fail' }, [el('b', { text: '점검' }), el('span', { text: e.message })])); })
+          .then(function () { btn.disabled = false; });
+    }
+    function probeRoot(r, btn) {
+        var box = btn.parentNode.querySelector('.gdw-checks');
+        box.hidden = false;
+        var line = function (cls, label, text) { return el('div', { class: 'gdw-checkline ' + cls }, [el('b', { text: label }), el('span', { text: text })]); };
+        if (btn.getAttribute('data-probing') !== '1') {
+            btn.disabled = true;
+            rpc('feed_probe_start', { root: r }).then(function (d) {
+                clear(box).appendChild(line('warn', '변경 목록 시험', d.message));
+                btn.textContent = '결과 확인'; btn.setAttribute('data-probing', '1');
+            }).catch(function (e) { clear(box).appendChild(line('fail', '변경 목록 시험', e.message)); })
+              .then(function () { btn.disabled = false; });
+            return;
+        }
+        btn.disabled = true;
+        rpc('feed_probe_check', { root: r }).then(function (d) {
+            clear(box).appendChild(line(/정상/.test(d.verdict) ? 'ok' : 'fail', '결과', d.verdict));
+            box.appendChild(line('', '변경 목록', d.feed + ' · ' + d.total + '건 (최근 30건)'));
+            (d.rows || []).forEach(function (x) {
+                box.appendChild(line(x.inside ? 'ok' : '', x.inside ? '감시 폴더 안' : (x.inside === false ? '범위 밖' : '확인 불가'),
+                    (x.removed ? '[삭제] ' : '') + x.name));
+            });
+            btn.textContent = '변경 목록 시험'; btn.removeAttribute('data-probing');
+        }).catch(function (e) { box.appendChild(line('fail', '결과', e.message)); })
           .then(function () { btn.disabled = false; });
     }
     function renderVfs() {
