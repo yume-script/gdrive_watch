@@ -107,7 +107,7 @@
             var since = r.status === 'seeding' && r.updated ? Math.max(0, Math.round((Date.now() - new Date(r.updated).getTime()) / 60000)) : null;
             tbody.appendChild(el('tr', {}, [
                 el('td', {}, [el('strong', { text: r.name }), el('small', { text: r.local_root })]),
-                el('td', { text: r.fallback === 'userfeed' ? 'Drive · Changes (계정 전체 변경 목록)' : r.mode === 'activity' ? (r.fallback ? 'Drive · Changes (Activity 권한 없어 자동 전환)' : 'Drive · Activity') : r.mode === 'local' ? '로컬' + (r.local_detect === 'polling' ? ' · 주기' : r.local_detect === 'inotify' ? ' · 실시간' : '') : 'Drive · Changes' }),
+                el('td', { text: (r.fallback === 'userfeed' || r.fallback === 'drivepoll') ? 'Drive · 폴더 비교 (변경 목록 사용 불가로 자동 전환)' : r.mode === 'drivepoll' ? 'Drive · 폴더 비교' : r.mode === 'activity' ? (r.fallback ? 'Drive · Changes (Activity 권한 없어 자동 전환)' : 'Drive · Activity') : r.mode === 'local' ? '로컬' + (r.local_detect === 'polling' ? ' · 주기' : r.local_detect === 'inotify' ? ' · 실시간' : '') : 'Drive · Changes' }),
                 el('td', {}, [el('span', { class: 'gdw-tag ' + cls, text: label }),
                     r.error ? el('small', { class: 'gdw-err', text: r.error }) : null,
                     since !== null ? el('small', { text: shortTime(r.updated) + ' 시작, ' + since + '분 경과 · 끝나면 쌓인 변경부터 처리' }) : null,
@@ -355,7 +355,7 @@
         var box = clear(bind('root-rows'));
         st.watch.roots.forEach(function (r, idx) {
             var mode = el('select', {}, [el('option', { value: 'changes', text: 'Drive · Changes' }), el('option', { value: 'activity', text: 'Drive · Activity' }),
-                el('option', { value: 'local', text: '로컬 폴더' })]);
+                el('option', { value: 'drivepoll', text: 'Drive · 폴더 비교' }), el('option', { value: 'local', text: '로컬 폴더' })]);
             mode.value = r.mode || 'changes';
             mode.addEventListener('change', function () { r.mode = mode.value; renderRoots(); });
             var local = r.mode === 'local';
@@ -371,8 +371,13 @@
             } else {
                 cells.push(field('rclone 리모트', input(r, 'source_remote', { list: 'gdw-remotes', placeholder: 'zeeps_member' })),
                     field('Drive 폴더 ID', input(r, 'root_id', { placeholder: '1AbC…' })),
-                    field('로컬 경로', input(r, 'local_root', { placeholder: '/mnt/gds/책' })),
-                    checkbox(r, 'seed', '기존 파일 목록 수집', true));
+                    field('로컬 경로', input(r, 'local_root', { placeholder: '/mnt/gds/책' })));
+                if (r.mode === 'drivepoll') {
+                    if (!r.drive_interval) r.drive_interval = 600;
+                    cells.push(field('비교 주기(초)', input(r, 'drive_interval', { type: 'number', min: 120 })));
+                } else {
+                    cells.push(checkbox(r, 'seed', '기존 파일 목록 수집', true));
+                }
             }
             cells.push(checkbox(r, 'enabled', '사용', true),
                 el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet gdw-check-btn', text: '점검', title: '이 설정으로 실제 감시가 되는지 점검',

@@ -653,7 +653,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 continue
             if not str(root.get("root_id") or "").strip() or not str(root.get("source_remote") or "").strip():
                 return {"success": False, "error": f"[{name}] 리모트와 폴더 ID를 입력하세요."}
-            roots.append({"name": name, "mode": root.get("mode") if root.get("mode") == "activity" else "changes",
+            roots.append({"name": name, "mode": root.get("mode") if root.get("mode") in ("activity", "drivepoll") else "changes",
+                          "drive_interval": max(120, int(root.get("drive_interval") or 600)),
                           "source_remote": str(root["source_remote"]).strip().rstrip(":"),
                           "root_id": str(root["root_id"]).strip(), "local_root": local_root,
                           "seed": bool(root.get("seed", True)), "enabled": bool(root.get("enabled", True)),
@@ -707,7 +708,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         fallback = _read_json("fallback.json", {}) or {}
         old_modes = {r.get("name"): r.get("mode") for r in (_read_json("watch.json", {}) or {}).get("roots") or []}
         for r in roots:
-            if r["name"] in fallback and fallback[r["name"]] == "changes" and (r["mode"] != "activity" or old_modes.get(r["name"]) != "activity"):
+            if r["name"] in fallback and old_modes.get(r["name"]) != r["mode"]:
                 fallback.pop(r["name"], None)
         _write_json("fallback.json", fallback)
         data["env"] = (_read_json("watch.json", {}) or {}).get("env") or {}
@@ -912,7 +913,16 @@ class GDriveWatchProvider(BaseMetadataProvider):
             add("Drive 폴더", True, f"'{data.get('name')}' 폴더 확인")
         # 3) 변경을 받을 수 있는지
         drive_id = data.get("driveId") or ""
-        if mode == "changes":
+        if root.get("mode") == "drivepoll":
+            try:
+                q = f"'{real_id}' in parents and trashed = false"
+                listed = api.get("files", q=q, pageSize=10, corpora="allDrives", includeItemsFromAllDrives="true",
+                                 fields="files(id)").get("files") or []
+                add("변경 수신", True, f"폴더 비교 사용 가능 · {int(root.get('drive_interval') or 600)}초마다 폴더 트리를 훑어 비교합니다 "
+                                     f"(바로 아래 항목 {len(listed)}개 이상 확인).")
+            except Exception as error:
+                add("변경 수신", False, f"폴더 내용을 읽을 수 없습니다: {error}")
+        elif mode == "changes":
             try:
                 params = {"driveId": drive_id} if drive_id else {}
                 api.get("changes/startPageToken", **params)

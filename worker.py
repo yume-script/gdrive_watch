@@ -443,8 +443,14 @@ class Rclone:
                  remote, expiry.astimezone().strftime("%H:%M"))
         return data["access_token"], expiry
 
+    _lock = threading.RLock()
+
     def token(self, remote, force=False):
         """rclone.conf는 FF·호스트 rclone과 공유한다는 전제로, 리모트 종류에 따라 토큰을 얻는다 (auth_mode 참고)."""
+        with self._lock:
+            return self._token(remote, force)
+
+    def _token(self, remote, force=False):
         self.config_changed()
         cached = self._tokens.get(remote)
         if cached and not force and cached["expiry"] - utcnow() > timedelta(minutes=3):
@@ -1039,6 +1045,181 @@ class ActivityWatcher(Watcher):
         if kind in ("edit", "create") and cur and not is_dir and prev and prev["path"] == cur["path"]:
             forced = {"action": "edit", "item_type": "file", "path": cur["path"], "removed_path": ""}
         return self.emit(file_id, prev, cur, receipt, forced)
+
+
+# ─────────────────────────── Drive 폴더 비교 ───────────────────────────
+# 변경 목록을 쓸 수 없는 경우(공유 드라이브 멤버가 아니라 폴더만 공유받은 계정 등)를 위한 방식.
+# 정해진 주기마다 감시 폴더 트리를 Drive API로 훑어(폴더 50개씩 묶고, 4개를 동시에 조회) 이전 목록과 비교한다.
+# 훑는 작업은 감시 폴더마다 별도 스레드에서 돌아서, 크고 느린 폴더가 다른 폴더의 감시를 막지 않는다.
+
+POLL_FIELDS = "nextPageToken,files(id,name,mimeType,parents,size,md5Checksum,modifiedTime,shortcutDetails(targetId,targetMimeType))"
+
+
+class DrivePollWatcher(Watcher):
+    mode = "drivepoll"
+
+    def __init__(self, cfg, store, rclone, extensions, buffer_seconds, api_timeout):
+        super().__init__(cfg, store, rclone, extensions, buffer_seconds, api_timeout)
+        self.interval = max(120, int(cfg.get("drive_interval") or 600))
+        self.thread = None
+        self.next_sweep = 0.0
+        self.progress = {"folders": 0, "items": 0, "started": 0.0}
+        self.last = ""
+
+    def poll(self):
+        """주 루프에서는 결과만 확인하고, 실제 훑기는 백그라운드 스레드가 한다."""
+        token, status = self.store.get_cursor(self.name)
+        if status == "blocked":
+            self.stat["note"] = "확인 필요로 중지 (처음부터를 누르면 기준 목록을 다시 수집)"
+            return 0
+        if self.thread and self.thread.is_alive():
+            p = self.progress
+            self.stat["note"] = (f"폴더 비교 중 · {p['items']:,}개 / 폴더 {p['folders']:,}개 · "
+                                 f"{int(time.time() - p['started'])}초 경과")
+            return 0
+        if self.last:
+            self.stat["note"], self.last = self.last, ""
+            return 0
+        if time.monotonic() < self.next_sweep:
+            left = int(self.next_sweep - time.monotonic())
+            self.stat["note"] = f"폴더 비교 · 다음 비교 {left // 60}분 {left % 60}초 후"
+            return 0
+        self.check_root()
+        self.thread = threading.Thread(target=self._sweep, args=(token,), daemon=True, name=f"drivepoll-{self.name}")
+        self.progress = {"folders": 0, "items": 0, "started": time.time()}
+        self.thread.start()
+        self.stat["note"] = "폴더 비교 시작"
+        return 0
+
+    def _crawl(self):
+        from concurrent.futures import ThreadPoolExecutor
+        # 폴더만 공유받은 공유 드라이브도 조회되도록 allDrives + 부모 폴더 조건으로 찾는다
+        scope = {"corpora": "allDrives"}
+        current, level, seen = {}, [(self.root_id, self.local_root)], {self.root_id}
+
+        def fetch(batch):
+            parents = dict(batch)
+            q = "(" + " or ".join(f"'{fid}' in parents" for fid in parents) + ") and trashed = false"
+            out, page = [], None
+            while not STOP:
+                params = dict(scope, q=q, pageSize=1000, includeItemsFromAllDrives="true", fields=POLL_FIELDS)
+                if page:
+                    params["pageToken"] = page
+                data = self.api.get("files", **params)
+                for f in data.get("files") or []:
+                    parent = next((p for p in f.get("parents") or [] if p in parents), None)
+                    if parent and f.get("name"):
+                        out.append((parents[parent], f))
+                page = data.get("nextPageToken")
+                if not page:
+                    break
+            return out
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            while level and not STOP:
+                batches = [level[i:i + 50] for i in range(0, len(level), 50)]
+                level = []
+                for batch, result in zip(batches, pool.map(fetch, batches)):
+                    self.progress["folders"] += len(batch)
+                    for base, f in result:
+                        path = posixpath.join(base, f["name"].replace("/", "／"))
+                        mime = f.get("mimeType")
+                        target = f.get("shortcutDetails") or {}
+                        if mime == SHORTCUT_MIME and target.get("targetMimeType") == FOLDER_MIME:
+                            current[f["id"]] = (path, True, f"shortcut:{target['targetId']}")
+                            if target["targetId"] not in seen:
+                                seen.add(target["targetId"])
+                                level.append((target["targetId"], path))
+                        elif mime == FOLDER_MIME:
+                            current[f["id"]] = (path, True, "")
+                            if f["id"] not in seen:
+                                seen.add(f["id"])
+                                level.append((f["id"], path))
+                        elif mime != SHORTCUT_MIME:
+                            current[f["id"]] = (path, False, f"{f.get('size', '')}:{f.get('md5Checksum') or f.get('modifiedTime', '')}")
+                    self.progress["items"] = len(current)
+        return current
+
+    def _sweep(self, token):
+        store = Store(self.store.path)
+        started = time.monotonic()
+        try:
+            current = self._crawl()
+            if STOP:
+                return
+            old = {row["file_id"]: (row["path"], bool(row["is_dir"]), row["sig"] or "")
+                   for row in store.db.execute("SELECT file_id, path, is_dir, sig FROM item WHERE root=?", (self.name,))}
+            first = not token.startswith("drivepoll")
+            if first:
+                # 기준 목록만 만든다 (이전 방식에서 남은 목록은 형식이 달라 버림)
+                store.replace_items(self.name, [(fid, v[0], v[1], v[2]) for fid, v in current.items()])
+                store.save_cursor(self.name, f"drivepoll:{int(time.time())}")
+                self.last = f"폴더 비교 기준 목록 수집 완료 ({len(current):,}개, 이후 변경부터 감지)"
+                log.info("[%s] %s", self.name, self.last)
+                return
+            removed = [fid for fid in old if fid not in current]
+            files_removed = sum(1 for fid in removed if not old[fid][1])
+            total = max(1, sum(1 for v in old.values() if not v[1]))
+            if not current and old or files_removed >= 100 and files_removed >= total * 0.2:
+                store.save_cursor(self.name, token, "blocked",
+                                  f"한 번에 파일 {files_removed:,}개가 사라진 것으로 보여(전체의 {files_removed * 100 // total}%) 반영을 멈췄습니다. "
+                                  "권한이나 공유가 바뀌었는지 확인 후 '처음부터'를 누르세요.")
+                self.last = "확인 필요로 중지 (대량 삭제 의심)"
+                return
+            events, upserts = [], []
+            removed_dirs = {old[fid][0] for fid in removed if old[fid][1]}
+            for fid in removed:
+                path, is_dir, _ = old[fid]
+                if any(under(path, d) and path != d for d in removed_dirs):
+                    continue  # 사라진 폴더 안의 항목은 폴더 하나로
+                events.append(build_event({"path": path, "is_dir": is_dir, "sig": ""}, None))
+            created_dirs = {v[0] for fid, v in current.items() if fid not in old and v[1]}
+            for fid, (path, is_dir, sig) in current.items():
+                prev = old.get(fid)
+                if prev == (path, is_dir, sig):
+                    continue
+                upserts.append((fid, path, is_dir, sig))
+                if prev is None and any(under(path, d) and path != d for d in created_dirs):
+                    continue  # 새 폴더 안의 항목은 폴더 하나로
+                ev = build_event({"path": prev[0], "is_dir": prev[1], "sig": prev[2]} if prev else None,
+                                 {"path": path, "is_dir": is_dir, "sig": sig})
+                if ev:
+                    events.append(ev)
+            self.reset_stat()
+            self.stat["raw"] = len(events)
+            rows = []
+            for ev in events:
+                if not self.relevant(ev):
+                    self.stat["ext"] += 1
+                    continue
+                screened = screen_event(ev)
+                if screened is None:
+                    self.stat["ext"] += 1
+                    continue
+                rows.append(screened)
+                log.info("[%s] %s %s %s", self.name, screened["action"], screened["item_type"], screened["path"])
+            now = datetime.now().isoformat(timespec="seconds")
+            with store.db:
+                store.db.executemany("DELETE FROM item WHERE root=? AND file_id=?", [(self.name, fid) for fid in removed])
+                store.db.executemany(
+                    "INSERT OR REPLACE INTO item(root, file_id, path, is_dir, sig) VALUES(?,?,?,?,?)",
+                    [(self.name, fid, path, int(is_dir), sig) for fid, path, is_dir, sig in upserts])
+                store.db.executemany(
+                    "INSERT INTO event(root, action, item_type, path, removed_path, created, ready_at) VALUES(?,?,?,?,?,?,?)",
+                    [(self.name, e["action"], e["item_type"], e["path"], e["removed_path"], now,
+                      time.time() + self.buffer_seconds) for e in rows])
+            store.save_cursor(self.name, f"drivepoll:{int(time.time())}")
+            self.stat["events"] = len(rows)
+            took = time.monotonic() - started
+            self.last = (f"폴더 비교 {len(current):,}개 · {int(took)}초 · 변경 {len(events)} → 기록 {len(rows)}"
+                         + (f", 제외 {self.stat['ext']}" if self.stat["ext"] else ""))
+        except Exception as error:
+            store.set_error(self.name, str(error))
+            self.last = f"오류: {error}"
+            log.error("[%s] 폴더 비교 실패: %s", self.name, error)
+        finally:
+            self.next_sweep = time.monotonic() + self.interval
+            store.db.close()
 
 
 # ─────────────────────────── 로컬 폴더 감시 ───────────────────────────
@@ -2012,7 +2193,8 @@ class Worker:
             try:
                 fallback = self.fallbacks().get(root.get("name"))
                 activity = root.get("mode") == "activity" and fallback != "changes"
-                cls = ActivityWatcher if activity else ChangesWatcher
+                drivepoll = root.get("mode") == "drivepoll" or fallback in ("drivepoll", "userfeed")
+                cls = DrivePollWatcher if drivepoll else ActivityWatcher if activity else ChangesWatcher
                 watcher = cls(root, self.store, rclone, extensions, buffer_seconds, int(cfg.get("api_timeout", 60)))
                 watcher.user_feed = fallback == "userfeed"
                 watcher.verbose = bool(cfg.get("verbose_log"))
@@ -2094,13 +2276,18 @@ class Worker:
                     self.store.set_error(watcher.name, watcher.stat["note"])
                 elif error.code == 403 and isinstance(watcher, ChangesWatcher) and "membership" in str(error).lower() \
                         and not watcher.user_feed:
-                    # 공유 드라이브 멤버가 아니라 폴더만 공유받은 계정: 드라이브 단위 변경 목록 대신 계정 전체 변경 목록을 쓴다
-                    self.set_fallback(watcher.name, "userfeed")
-                    watcher.user_feed, watcher.root_checked = True, False
-                    message = (f"[{watcher.name}] 이 계정은 공유 드라이브 멤버가 아니라 드라이브 단위 변경 목록을 받을 수 없어, "
-                               "계정 전체 변경 목록으로 전환했습니다. 이 시점 이후의 변경부터 감지합니다.")
+                    # 공유 드라이브 멤버가 아니라 폴더만 공유받은 계정: 변경 목록 대신 폴더 비교로 감시한다
+                    # (계정 전체 변경 목록은 관계없는 변경이 수십만 건이라 쓸 수 없음)
+                    self.set_fallback(watcher.name, "drivepoll")
+                    replacement = DrivePollWatcher(dict(watcher.cfg, mode="drivepoll"), self.store, watcher.rclone,
+                                                   watcher.extensions, watcher.buffer_seconds, watcher.api.timeout)
+                    replacement.verbose = watcher.verbose
+                    self.watchers[self.watchers.index(watcher)] = replacement
+                    message = (f"[{watcher.name}] 이 계정은 공유 드라이브 멤버가 아니라 변경 목록을 받을 수 없어, "
+                               "폴더 비교 방식으로 전환했습니다.")
                     log.warning(message)
-                    lines.append(f"{watcher.name}: 공유 드라이브 멤버 아님 → 계정 전체 변경 목록으로 전환")
+                    self.notifier.root_error(watcher.name, message)
+                    lines.append(f"{watcher.name}: 공유 드라이브 멤버 아님 → 폴더 비교로 전환")
                     continue
                 elif error.code == 403 and isinstance(watcher, ActivityWatcher) and self.scope_missing(error):
                     # 토큰에 drive.activity.readonly가 없으면 Activity를 쓸 수 없다 → 같은 폴더를 Changes로 감시
