@@ -207,6 +207,7 @@ DEFAULT_WATCH = {
     "file_wait_minutes": 10,
     "full_scan_guard_minutes": 10,
     "drive_workers": 4,
+    "drive_rps": 3,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -700,6 +701,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "file_wait_minutes": max(0, int(watch.get("file_wait_minutes", 10) or 0)),
             "full_scan_guard_minutes": max(0, int(watch.get("full_scan_guard_minutes", 10) or 0)),
             "drive_workers": min(16, max(1, int(watch.get("drive_workers", 4) or 4))),
+            "drive_rps": min(50.0, max(0.5, float(watch.get("drive_rps", 3) or 3))),
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),

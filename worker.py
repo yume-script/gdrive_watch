@@ -568,17 +568,54 @@ class Rclone:
         return env
 
 
+RATE_REASONS = ("ratelimitexceeded", "userratelimitexceeded", "rate limit", "quota exceeded", "backenderror")
+DRIVE_RPS = 3.0  # 리모트당 Drive API 초당 요청 수 (설정에서 바꿈)
+
+
+class RateLimiter:
+    """리모트(=같은 토큰)별로 요청 간격을 맞춘다. 여러 스레드·감시 폴더가 같은 토큰을 써도 합쳐서 초당 DRIVE_RPS를 넘지 않는다."""
+    _all = {}
+    _guard = threading.Lock()
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.next_at = 0.0
+        self.penalty_until = 0.0
+
+    @classmethod
+    def of(cls, remote):
+        with cls._guard:
+            return cls._all.setdefault(remote, cls())
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            start = max(now, self.next_at, self.penalty_until)
+            self.next_at = start + 1.0 / max(0.2, DRIVE_RPS)
+        delay = start - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+    def penalize(self, seconds):
+        """호출 제한에 걸리면 이 리모트의 모든 요청을 잠시 멈춘다."""
+        with self.lock:
+            self.penalty_until = max(self.penalty_until, time.monotonic() + seconds)
+
+
 class DriveApi:
     def __init__(self, rclone, remote, timeout=60):
         self.rclone, self.remote, self.timeout = rclone, remote, timeout
+        self.limiter = RateLimiter.of(remote)
 
     @property
     def team_drive(self):
         return self.rclone.token(self.remote)["team_drive"]
 
     def call(self, url, body=None):
-        for attempt in (0, 1):
-            access = self.rclone.token(self.remote, force=attempt == 1)["access"]
+        auth_retry, backoff = False, 0
+        while True:
+            self.limiter.wait()
+            access = self.rclone.token(self.remote, force=auth_retry)["access"]
             request = Request(url, data=None if body is None else json.dumps(body).encode(),
                               headers={"Authorization": f"Bearer {access}", "Content-Type": "application/json"})
             try:
@@ -592,9 +629,19 @@ class DriveApi:
                     detail = f"{info.get('message') or raw[:300]}" + (f" ({reason})" if reason else "")
                 except (ValueError, AttributeError):
                     detail = raw[:300]
-                if error.code == 401 and attempt == 0:
+                if error.code == 401 and not auth_retry:
+                    auth_retry = True
                     continue
-                raise DriveError(error.code, detail) from None
+                limited = error.code in (429, 500, 502, 503) or \
+                    (error.code == 403 and any(r in detail.lower() for r in RATE_REASONS))
+                if limited and backoff < 6 and not STOP:
+                    # 호출 제한: 2, 4, 8, 16, 32, 64초 + 무작위로 쉬었다가 재시도 (같은 리모트의 다른 요청도 같이 쉼)
+                    wait = 2 ** (backoff + 1) + (hash((url, time.time())) % 1000) / 1000
+                    backoff += 1
+                    self.limiter.penalize(wait)
+                    log.info("[%s] Drive 호출 제한(%s) → %.0f초 쉬고 다시 시도 (%d/6)", self.remote, reason or error.code, wait, backoff)
+                    continue
+                raise DriveError(429 if limited else error.code, detail) from None
 
     def get(self, path, **params):
         params.setdefault("supportsAllDrives", "true")
@@ -1052,6 +1099,7 @@ class ActivityWatcher(Watcher):
 # 정해진 주기마다 감시 폴더 트리를 Drive API로 훑어(폴더 50개씩 묶어 여러 개를 동시에 조회) 이전 목록과 비교한다.
 # 훑는 작업은 감시 폴더마다 별도 스레드에서 돌아서, 크고 느린 폴더가 다른 폴더의 감시를 막지 않는다.
 
+SWEEP_LOCKS = {}  # 리모트 → 폴더 비교 잠금
 POLL_FIELDS = "nextPageToken,files(id,name,mimeType,parents,size,md5Checksum,modifiedTime,shortcutDetails(targetId,targetMimeType))"
 
 
@@ -1075,8 +1123,11 @@ class DrivePollWatcher(Watcher):
             return 0
         if self.thread and self.thread.is_alive():
             p = self.progress
-            self.stat["note"] = (f"폴더 비교 중 · {p['items']:,}개 / 폴더 {p['folders']:,}개 · "
-                                 f"{int(time.time() - p['started'])}초 경과")
+            if p.get("queued"):
+                self.stat["note"] = "폴더 비교 대기 · 같은 리모트의 다른 폴더 비교가 끝나면 시작"
+            else:
+                self.stat["note"] = (f"폴더 비교 중 · {p['items']:,}개 / 폴더 {p['folders']:,}개 · "
+                                     f"{int(time.time() - p['started'])}초 경과")
             return 0
         if self.last:
             self.stat["note"], self.last = self.last, ""
@@ -1144,8 +1195,14 @@ class DrivePollWatcher(Watcher):
     def _sweep(self, token):
         store = Store(self.store.path)
         started = time.monotonic()
+        lock = SWEEP_LOCKS.setdefault(self.source_remote, threading.Lock())
         try:
-            current = self._crawl()
+            # 같은 리모트(같은 토큰)를 쓰는 폴더 비교는 하나씩 차례로 (호출 제한 방지)
+            self.progress["queued"] = True
+            with lock:
+                self.progress["queued"] = False
+                self.progress["started"] = time.time()
+                current = self._crawl()
             if STOP:
                 return
             old = {row["file_id"]: (row["path"], bool(row["is_dir"]), row["sig"] or "")
@@ -1214,6 +1271,14 @@ class DrivePollWatcher(Watcher):
             took = time.monotonic() - started
             self.last = (f"폴더 비교 {len(current):,}개 · {int(took)}초 · 변경 {len(events)} → 기록 {len(rows)}"
                          + (f", 제외 {self.stat['ext']}" if self.stat["ext"] else ""))
+        except DriveError as error:
+            if error.code == 429:
+                self.last = "Drive 호출 제한으로 이번 비교를 건너뜀 (다음 주기에 다시 시도)"
+                log.warning("[%s] %s: %s", self.name, self.last, error)
+            else:
+                store.set_error(self.name, str(error))
+                self.last = f"오류: {error}"
+                log.error("[%s] 폴더 비교 실패: %s", self.name, error)
         except Exception as error:
             store.set_error(self.name, str(error))
             self.last = f"오류: {error}"
@@ -2168,7 +2233,8 @@ class Worker:
                                for e in re.split(r"[\s,]+", ext.lower()) if e)
         else:
             extensions = tuple(DEFAULT_EXTENSIONS)
-        global IGNORE
+        global IGNORE, DRIVE_RPS
+        DRIVE_RPS = min(50.0, max(0.5, float(cfg.get("drive_rps", 3) or 3)))
         patterns = cfg.get("ignore_patterns")
         try:
             IGNORE = compile_patterns(DEFAULT_IGNORE_PATTERNS if patterns is None else patterns)
