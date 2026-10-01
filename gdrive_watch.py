@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -371,6 +372,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 "stat": dict(stat) if stat else None,
             })
         oldest = db.execute("SELECT MIN(created) FROM event WHERE status IN ('pending','waiting')").fetchone()[0]
+        db_missing = db.execute("SELECT COUNT(*) FROM event WHERE status='done' AND result LIKE '%\"db_ok\": false%'").fetchone()[0]
         token_fail = db.execute("SELECT COUNT(*) FROM event WHERE status IN ('failed','pending') AND "
                                 "(message LIKE '%토큰 불일치%' OR message LIKE '%Invalid webhook token%')").fetchone()[0]
         db.close()
@@ -400,7 +402,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
                                              "error": beat.get("error"), "stopped_by_user": os.path.exists(_path("disabled.flag"))},
                 "counts": counts, "today": today_counts, "roots": roots, "warnings": warnings,
                 "libraries": len(runtime.get("libraries") or []), "auto_start": runtime.get("auto_start"),
-                "version": _plugin_version()}
+                "version": _plugin_version(), "db_missing": db_missing}
 
     def _rpc_start(self, ctx):
         self._clear_disabled()
@@ -429,7 +431,9 @@ class GDriveWatchProvider(BaseMetadataProvider):
         size = min(200, max(10, int(ctx.get("size") or 50)))
         where, params = [], []
         groups = {"pending": ("pending", "waiting"), "failed": ("failed", "timeout")}
-        if ctx.get("status"):
+        if ctx.get("status") == "db_missing":
+            where.append("status='done' AND result LIKE '%\"db_ok\": false%'")
+        elif ctx.get("status"):
             wanted = groups.get(ctx["status"], (ctx["status"],))
             where.append("status IN (" + ",".join("?" * len(wanted)) + ")")
             params += list(wanted)
@@ -444,7 +448,6 @@ class GDriveWatchProvider(BaseMetadataProvider):
         total = db.execute(f"SELECT COUNT(*) FROM event {clause}", params).fetchone()[0]
         rows = db.execute(f"SELECT * FROM event {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
                           params + [size, (page - 1) * size]).fetchall()
-        db.close()
         items = []
         for row in rows:
             item = dict(row)
@@ -453,7 +456,85 @@ class GDriveWatchProvider(BaseMetadataProvider):
             except ValueError:
                 item["result"] = {}
             items.append(item)
+        self._verify_db(db, items)
+        db.close()
         return {"success": True, "items": items, "total": total, "page": page, "size": size}
+
+    # ── 반영 확인: BookOasis DB에 실제로 들어갔는지 (플러그인 본체만 DB에 접근할 수 있어 여기서 확인) ──
+    @staticmethod
+    def _like_prefix(path):
+        escaped = path.rstrip("/").replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        return escaped + "/%"
+
+    def _check_book(self, db_type, library_id, ev):
+        """반환 (ok, 메시지). ok=None이면 확인할 수 없음."""
+        raw = self.get_db_gateway(db_type)
+
+        class _Gateway:  # 게이트웨이 자리표시자가 %s/? 중 무엇이든 동작하도록
+            @staticmethod
+            def fetch_one(sql, params):
+                try:
+                    return raw.fetch_one(sql, params)
+                except Exception:
+                    return raw.fetch_one(sql.replace("%s", "?"), params)
+        gateway = _Gateway()
+        deleting = ev["action"] == "delete"
+        path = (ev.get("removed_path") if deleting else ev.get("path")) or ev.get("path") or ""
+        alive = "COALESCE(is_deleted, 0) = 0"
+        if ev.get("item_type") == "directory":
+            row = gateway.fetch_one(f"SELECT COUNT(*) AS n FROM books WHERE file_path LIKE %s ESCAPE '!' AND {alive}",
+                                    (self._like_prefix(path),))
+            n = int((row or {}).get("n") or 0)
+            if deleting:
+                return (True, "폴더의 도서가 모두 정리됨") if n == 0 else (False, f"폴더 안 도서 {n}권이 아직 남아 있음")
+            return (True, f"폴더 안 도서 {n}권 등록됨") if n else (False, "폴더 안에 등록된 도서가 없음")
+        row = gateway.fetch_one(f"SELECT id, library_id, COALESCE(is_deleted, 0) AS gone FROM books WHERE file_path = %s LIMIT 1",
+                                (path,))
+        if not row:  # 이미지 폴더형 도서(…/__folder__.imgdir 등)는 경로 아래로 등록된다
+            row = gateway.fetch_one(f"SELECT id, library_id, COALESCE(is_deleted, 0) AS gone FROM books "
+                                    f"WHERE file_path LIKE %s ESCAPE '!' ORDER BY id LIMIT 1", (self._like_prefix(path),))
+        present = bool(row) and not int(row.get("gone") or 0)
+        if deleting:
+            return (True, "DB에서 정리됨" if not row else "휴지통으로 이동됨") if not present else (False, f"도서 #{row['id']}가 아직 남아 있음")
+        if not present:
+            return False, "DB에 이 파일의 도서가 없음" if not row else f"도서 #{row['id']}가 휴지통에 있음"
+        other = library_id and row.get("library_id") and int(row["library_id"]) != int(library_id)
+        return True, f"도서 #{row['id']}" + (f" (보관함 #{row['library_id']})" if other else "")
+
+    def _verify_db(self, db, items):
+        """화면에 보이는 '반영됨' 기록 중 아직 확인하지 않은 것을 확인하고 결과를 기록에 저장한다.
+        확인되지 않은 건은 반영 후 30분 동안은 다시 확인한다 (스캔 후 처리 지연 대비)."""
+        now = time.time()
+        checked = 0
+        for item in items:
+            result = item.get("result") or {}
+            if item.get("status") != "done" or checked >= 60:
+                continue
+            if result.get("db_ok") is True:
+                continue
+            if result.get("db_ok") is False:
+                try:
+                    finished = time.mktime(time.strptime(item.get("finished") or "", "%Y-%m-%dT%H:%M:%S"))
+                except ValueError:
+                    finished = 0
+                if now - finished > 1800 or now - float(result.get("db_at") or 0) < 30:
+                    continue
+            label = next((x.get("library") for x in result.get("scans") or [] if x.get("ok") and x.get("library")), "")
+            m = re.match(r"^(\w+)#(\d+)", label or "")
+            if not m:
+                continue
+            try:
+                ok, message = self._check_book(m.group(1), int(m.group(2)), item)
+            except Exception as error:
+                ok, message = None, f"확인 실패: {error}"
+            checked += 1
+            if ok is None:
+                result.update(db_msg=message, db_at=now)
+            else:
+                result.update(db_ok=ok, db_msg=message, db_at=now)
+            item["result"] = result
+            with db:
+                db.execute("UPDATE event SET result=? WHERE id=?", (json.dumps(result, ensure_ascii=False), item["id"]))
 
     def _rpc_retry(self, ctx):
         db = _db()

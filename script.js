@@ -96,7 +96,7 @@
         $$('.gdw-flow-seg').forEach(function (s) { s.classList.toggle('is-active', s.getAttribute('data-filter') === st.status); });
         var today = d.today || {};
         bind('meta').textContent = '오늘 ' + ((today.done || 0) + (today.skipped || 0)) + '건 처리, 실패 ' + ((today.failed || 0) + (today.timeout || 0)) +
-            (c.waiting ? ' · 파일 대기 ' + c.waiting + '건' : '') +
+            (c.waiting ? ' · 파일 대기 ' + c.waiting + '건' : '') + (d.db_missing ? ' · DB 확인 안 됨 ' + d.db_missing + '건' : '') +
             '건 · 보관함 ' + d.libraries + '개 인식' + (w.last_process ? ' · 마지막 처리 ' + shortTime(w.last_process) : '');
 
         var tbody = clear(bind('roots'));
@@ -191,7 +191,7 @@
                 el('div', { class: 'gdw-ev-path' }, [
                     el('div', { text: path + (ev.item_type === 'directory' ? '/' : ''), title: path }),
                     ev.action !== 'delete' && moved ? el('div', { class: 'from', text: ev.removed_path, title: ev.removed_path }) : null,
-                    el('div', { class: 'root' }, [ev.root].concat(libraryTags(ev)))
+                    el('div', { class: 'root' }, [ev.root].concat(libraryTags(ev), dbTag(ev)))
                 ]),
                 pipe
             ]);
@@ -227,6 +227,14 @@
         });
         return tags;
     }
+    function dbTag(ev) {
+        var r = ev.result || {};
+        if (ev.status !== 'done' || (r.db_ok === undefined && !r.db_msg)) return [];
+        var cls = r.db_ok === true ? 'ok' : r.db_ok === false ? 'fail' : '';
+        var text = r.db_ok === true ? 'DB 확인됨' : r.db_ok === false ? 'DB에 없음' : 'DB 확인 불가';
+        if (r.db_ok === false && ev.action === 'delete') text = 'DB에 남아 있음';
+        return [el('span', { class: 'gdw-db ' + cls, text: text, title: r.db_msg || '' })];
+    }
     function detail(ev) {
         var r = ev.result || {};
         var box = el('div', { class: 'gdw-ev-detail' });
@@ -239,6 +247,7 @@
         });
         if (!(r.vfs || []).length) v.appendChild(el('li', { text: ev.status === 'pending' ? '처리 전' : '해당 VFS 규칙 없음' }));
         box.appendChild(v);
+        if (r.db_msg) box.appendChild(el('div', { class: r.db_ok === false ? 'msg' : 'gdw-muted', text: 'DB 확인: ' + r.db_msg }));
         box.appendChild(el('h4', { text: 'BookOasis 스캔' }));
         var s = el('ul');
         (r.scans || []).forEach(function (x) {
