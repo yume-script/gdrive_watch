@@ -1273,7 +1273,8 @@ class DrivePollWatcher(Watcher):
                     if len(batch) > 1:  # 묶음 안의 문제 있는 폴더를 찾아 그것만 건너뛴다
                         half = len(batch) // 2
                         return fetch(batch[:half]) + fetch(batch[half:])
-                    log.warning("[%s] 폴더를 조회할 수 없어 건너뜀: %s (%s)", self.name, batch[0][1], error.detail)
+                    log.warning("[%s] 폴더를 조회할 수 없어 이번 비교에서 제외: %s (%s)", self.name, batch[0][1], error.detail)
+                    self.skipped[batch[0][0]] = batch[0][1]
                     return []
                 for f in data.get("files") or []:
                     parent = next((p for p in f.get("parents") or [] if p in parents), None)
@@ -1297,6 +1298,8 @@ class DrivePollWatcher(Watcher):
                     break
             return out
 
+        if not hasattr(self, "skipped"):
+            self.skipped = {}
         batches = [folders[i:i + 50] for i in range(0, len(folders), 50)]
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             for batch, rows in zip(batches, pool.map(fetch, batches)):
@@ -1316,6 +1319,9 @@ class DrivePollWatcher(Watcher):
             depth_of = {fid: depth for fid, _, depth in level}
             nxt = []
             for fid, path, depth in level:
+                if fid in getattr(self, "skipped", {}):
+                    folders[fid] = (path, depth, time.time(), 0)  # 조회 실패한 폴더도 목록에 남겨 다음 비교 때 다시 읽는다
+                    continue
                 newest = 0.0
                 for c in listed.get(fid, []):
                     items[c["id"]] = (c["path"], c["is_dir"], c["sig"])
@@ -1407,9 +1413,12 @@ class DrivePollWatcher(Watcher):
     def _full_sweep(self, store, token):
         """처음(기준 목록 만들기) 또는 나눠 훑기용 폴더 정보가 없을 때: 트리 전체를 한 번 훑는다."""
         now = time.time()
+        self.skipped = {}
         items, folders = self._crawl_all([(self.root_id, self.local_root, 0)])
         if STOP:
             return
+        if self.root_id in self.skipped:
+            raise RuntimeError("감시 폴더 자체를 조회할 수 없습니다. 폴더 ID와 이 리모트 계정의 접근 권한을 [점검]으로 확인하세요.")
         old = {row["file_id"]: (row["path"], bool(row["is_dir"]), row["sig"] or "")
                for row in store.db.execute("SELECT file_id, path, is_dir, sig FROM item WHERE root=?", (self.name,))}
         if not token.startswith("drivepoll"):
@@ -1417,6 +1426,7 @@ class DrivePollWatcher(Watcher):
             with store.db:
                 store.db.execute("DELETE FROM pollfolder WHERE root=?", (self.name,))
             self._save_folders(store, folders, now, spread=True)
+            self._retry_skipped(store)
             self.last = f"폴더 비교 기준 목록 수집 완료 ({len(items):,}개, 폴더 {len(folders):,}개 · 이후 변경부터 감지)"
             log.info("[%s] %s", self.name, self.last)
             return
@@ -1427,10 +1437,20 @@ class DrivePollWatcher(Watcher):
         with store.db:
             store.db.execute("DELETE FROM pollfolder WHERE root=?", (self.name,))
         self._save_folders(store, folders, now, spread=True)
+        self._retry_skipped(store)
         self.last = f"폴더 비교 {len(items):,}개 (전체) · 변경 {self.stat['raw']} → 기록 {rows}"
 
+    def _retry_skipped(self, store):
+        if getattr(self, "skipped", None):
+            with store.db:
+                store.db.executemany("UPDATE pollfolder SET last_list=0 WHERE root=? AND folder_id=?",
+                                     [(self.name, fid) for fid in self.skipped])
+
     def _diff_full(self, store, old, current):
-        removed = [fid for fid in old if fid not in current]
+        # 조회에 실패한 폴더 아래는 '사라짐'으로 보지 않는다 (일시적인 조회 실패로 대량 삭제 판정이 나는 것 방지)
+        skipped = list(getattr(self, "skipped", {}).values())
+        removed = [fid for fid in old if fid not in current
+                   and not any(under(old[fid][0], p) for p in skipped)]
         files_removed = sum(1 for fid in removed if not old[fid][1])
         total = max(1, sum(1 for v in old.values() if not v[1]))
         if not current and old or files_removed >= 100 and files_removed >= total * 0.2:
@@ -1502,6 +1522,7 @@ class DrivePollWatcher(Watcher):
         due.sort(key=lambda f: f["last_list"])
         due = due[:self.MAX_FOLDERS_PER_SWEEP]
         due.sort(key=lambda f: f["depth"])  # 상위 폴더부터: 이름이 바뀐 폴더를 먼저 알아야 하위 경로를 맞출 수 있다
+        self.skipped = {}
         listed = self._list([(f["folder_id"], f["path"]) for f in due])
         if STOP:
             return
@@ -1527,6 +1548,9 @@ class DrivePollWatcher(Watcher):
                 "SELECT file_id, path, is_dir, sig FROM item WHERE root=? AND substr(path, 1, ?)=? "
                 "AND instr(substr(path, ?), '/')=0", (self.name, len(prefix), prefix, len(prefix) + 1))}
             cur = {c["id"]: dict(c, path=remap(c["path"])) for c in listed.get(f["folder_id"], [])}
+            if f["folder_id"] in self.skipped:
+                touched[f["folder_id"]] = "skip"  # 조회 실패: 다음 비교 때 다시
+                continue
             if not cur and len(old) >= 20:
                 # 항목이 많던 폴더가 갑자기 비어 보이면 일시적인 조회 문제로 보고 이번에는 건너뛴다
                 log.warning("[%s] %s: 항목 %d개가 한꺼번에 사라져 보여 이번 비교에서 제외", self.name, f["path"], len(old))
@@ -1605,7 +1629,8 @@ class DrivePollWatcher(Watcher):
             return f"{seconds // 86400}일" if seconds >= 86400 else f"{seconds // 3600}시간" if seconds >= 3600 else f"{seconds // 60}분"
         tiers = " / ".join([f"매번 {counts[0]:,}"] + [f"{human(iv)} {counts[i]:,}" for i, (_, iv) in enumerate(self.tiers, 1)])
         self.last = (f"폴더 비교 (나눠 훑기) · 이번 {len(due):,}/{len(folders):,}개 폴더 · 변경 {self.stat['raw']} → 기록 {self.stat['events']}"
-                     + (f" · 깨움 {woken}" if woken else "") + f" · {tiers}")
+                     + (f" · 깨움 {woken}" if woken else "") + (f" · 조회 실패 {len(self.skipped)}(다음에 다시)" if self.skipped else "")
+                     + f" · {tiers}")
 
 
 # ─────────────────────────── 로컬 폴더 감시 ───────────────────────────
