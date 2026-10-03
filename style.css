@@ -1195,3 +1195,16 @@
 .gdw-roots tr.gdw-child-row td { background: color-mix(in srgb, var(--app-bg-main) 50%, transparent); }
 
 .gdw-opts .gdw-subhead { grid-column: 1 / -1; margin-top: 6px; font-size: 11.5px; color: var(--app-text-secondary); }
+
+/* 감시 폴더 세부 펼치기 */
+.gdw-name { display: flex; align-items: center; gap: 6px; }
+.gdw-expander { width: 18px; height: 18px; flex-shrink: 0; border: 1px solid var(--app-border); border-radius: 5px; background: var(--app-bg-card);
+  cursor: pointer; position: relative; padding: 0; }
+.gdw-expander::after { content: ""; position: absolute; left: 6px; top: 4px; width: 5px; height: 5px; border-right: 1.5px solid var(--app-text-muted);
+  border-bottom: 1.5px solid var(--app-text-muted); transform: rotate(-45deg); transition: transform .15s ease; }
+.gdw-expander.is-open::after { transform: rotate(45deg); left: 5px; top: 3px; }
+.gdw-expander:hover { background: var(--app-bg-card-hover); }
+.gdw-expander-gap { width: 18px; flex-shrink: 0; }
+.gdw-roots tr.gdw-sub-row td { background: color-mix(in srgb, var(--app-bg-main) 60%, transparent); font-size: 12px; padding-top: 7px; padding-bottom: 7px; }
+.gdw-roots tr.gdw-sub-row td small { margin-top: 1px; }
+.gdw-roots tr.gdw-sub-row .gdw-name span:last-child { color: var(--app-text-primary); font-weight: 600; }

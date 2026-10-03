@@ -11,7 +11,8 @@
 
     var ACTION = { create: '추가', edit: '수정', rename: '이동', move: '이동', delete: '삭제', restore: '복원' };
     var STATUS = { pending: '대기', waiting: '잠시 대기', done: '반영됨', skipped: '보관함 밖', failed: '실패', timeout: '시간 초과' };
-    var st = { status: '', q: '', page: 1, size: 50, total: 0, open: {}, picked: {}, tab: 'events', watch: null, alive: false };
+    var st = { status: '', q: '', page: 1, size: 50, total: 0, open: {}, picked: {}, tab: 'events', watch: null, alive: false,
+        expanded: {}, breakdown: {} };
 
     function $(sel) { return app.querySelector(sel); }
     function $$(sel) { return Array.prototype.slice.call(app.querySelectorAll(sel)); }
@@ -109,10 +110,14 @@
             var label = !r.enabled ? '꺼짐' : r.status === 'ready' ? '정상' : r.status === 'blocked' ? '확인 필요로 중지' :
                 r.status === 'error' ? '오류' : r.status === 'seeding' ? '정상' : '첫 확인 대기';
             var since = r.status === 'seeding' && r.updated ? Math.max(0, Math.round((Date.now() - new Date(r.updated).getTime()) / 60000)) : null;
+            var key = r.name + '|' + r.local_root;
+            var expander = el('button', { type: 'button', class: 'gdw-expander' + (st.expanded[key] ? ' is-open' : ''),
+                title: '바로 아래 폴더별로 펼쳐 보기', 'aria-label': '세부 보기',
+                onclick: function () { toggleBreakdown(r.name, r.local_root, 0); } });
             tbody.appendChild(el('tr', { class: r.child_of ? 'gdw-child-row' : '' }, [
-                el('td', {}, r.child_of ? [el('strong', { text: '↪ ' + r.name.split(' › ').slice(-1)[0] }),
+                el('td', {}, r.child_of ? [el('div', { class: 'gdw-name' }, [expander, el('strong', { text: '↪ ' + r.name.split(' › ').slice(-1)[0] })]),
                     el('small', { text: '바로가기 대상 (다른 드라이브: ' + r.drive + ') · ' + r.local_root })]
-                    : [el('strong', { text: r.name }), el('small', { text: r.local_root })]),
+                    : [el('div', { class: 'gdw-name' }, [expander, el('strong', { text: r.name })]), el('small', { text: r.local_root })]),
                 el('td', { text: (r.fallback === 'userfeed' || r.fallback === 'drivepoll') ? 'Drive · 폴더 비교 (변경 목록 사용 불가로 자동 전환)' : r.mode === 'drivepoll' ? 'Drive · 폴더 비교' : r.mode === 'activity' ? (r.fallback ? 'Drive · Changes (Activity 권한 없어 자동 전환)' : 'Drive · Activity') : r.mode === 'local' ? '로컬' + (r.local_detect === 'polling' ? ' · 주기' : r.local_detect === 'inotify' ? ' · 실시간' : '') : 'Drive · Changes' }),
                 el('td', {}, [el('span', { class: 'gdw-tag ' + cls, text: label }),
                     r.error ? el('small', { class: 'gdw-err', text: r.error }) : null,
@@ -128,8 +133,78 @@
                     }
                 })])
             ]));
+            if (st.expanded[key]) appendBreakdown(tbody, r.name, r.local_root, 1);
         });
     }
+
+    // ───────── 감시 폴더 세부 (폴더별 펼치기) ─────────
+    function human(seconds) {
+        if (seconds === 0) return '매 주기';
+        if (seconds >= 86400) return Math.round(seconds / 86400) + '일마다';
+        if (seconds >= 3600) return Math.round(seconds / 3600) + '시간마다';
+        return Math.round(seconds / 60) + '분마다';
+    }
+    function ago(epoch) {
+        if (!epoch) return '';
+        var m = Math.round((Date.now() / 1000 - epoch) / 60);
+        return m < 60 ? m + '분 전' : m < 1440 ? Math.round(m / 60) + '시간 전' : Math.round(m / 1440) + '일 전';
+    }
+    function toggleBreakdown(root, path, level) {
+        var key = root + '|' + path;
+        if (st.expanded[key]) {
+            Object.keys(st.expanded).forEach(function (k) { if (k === key || k.indexOf(key + '/') === 0) delete st.expanded[k]; });
+            loadStatus();
+            return;
+        }
+        st.expanded[key] = true;
+        rpc('breakdown', { root: root, path: path }).then(function (d) {
+            st.breakdown[key] = d; loadStatus();
+        }).catch(function (e) { delete st.expanded[key]; toast(e.message, true); });
+    }
+    function appendBreakdown(tbody, root, path, level) {
+        var key = root + '|' + path;
+        var d = st.breakdown[key];
+        if (!d) { tbody.appendChild(el('tr', { class: 'gdw-sub-row' }, [el('td', { colspan: 6, class: 'gdw-muted', text: '불러오는 중…' })])); return; }
+        var pad = { style: 'padding-left:' + (14 + level * 22) + 'px' };
+        if (d.files_here) {
+            tbody.appendChild(el('tr', { class: 'gdw-sub-row' }, [
+                el('td', pad, [el('small', { text: '이 폴더 바로 아래 파일 ' + d.files_here.toLocaleString() + '개' })]),
+                el('td'), el('td'), el('td'), el('td'), el('td')]));
+        }
+        d.rows.forEach(function (x) {
+            var childKey = root + '|' + x.path;
+            var open = !!st.expanded[childKey];
+            var expander = x.subdirs ? el('button', { type: 'button', class: 'gdw-expander' + (open ? ' is-open' : ''),
+                'aria-label': '세부 보기', onclick: function () { toggleBreakdown(root, x.path, level + 1); } }) : el('span', { class: 'gdw-expander-gap' });
+            var tierText = d.polled ? (x.interval === null || x.interval === undefined ? '-' : human(x.interval)) : '';
+            var buckets = d.polled && x.buckets && x.buckets.length > 1
+                ? '하위 ' + x.buckets.map(function (b) { return human(b[0]) + ' ' + b[1].toLocaleString(); }).join(' / ') : '';
+            tbody.appendChild(el('tr', { class: 'gdw-sub-row' }, [
+                el('td', pad, [el('div', { class: 'gdw-name' }, [expander, el('span', { text: (x.shortcut ? '↪ ' : '') + x.name })]),
+                    el('small', { text: '폴더 ' + x.subdirs.toLocaleString() + '개' + (x.shortcut ? ' · 바로가기' : '') })]),
+                el('td', {}, [d.polled ? el('span', { class: 'gdw-tag', text: tierText }) : null]),
+                el('td', {}, [
+                    d.polled && x.last_change ? el('small', { text: '최근 변경 ' + ago(x.last_change) + (x.last_list ? ' · 마지막으로 읽음 ' + ago(x.last_list) : ' · 다음 비교 때 읽음') }) : null,
+                    buckets ? el('small', { text: buckets }) : null]),
+                el('td', { text: x.files.toLocaleString() }),
+                el('td', { text: shortTime(x.last_event) || '-' }),
+                el('td', {}, [d.polled ? el('button', { type: 'button', class: 'gdw-btn gdw-btn-quiet', text: '바로 읽기',
+                    title: '이 폴더와 하위 폴더를 다음 비교 때 바로 읽습니다',
+                    onclick: function () { act('force_folder', { root: root, path: x.path }); } }) : null])
+            ]));
+            if (open) appendBreakdown(tbody, root, x.path, level + 1);
+        });
+        if (d.more) tbody.appendChild(el('tr', { class: 'gdw-sub-row' }, [el('td', { colspan: 6, class: 'gdw-muted', text: '… 외 폴더 ' + d.more + '개' })]));
+        if (!d.rows.length && !d.files_here) tbody.appendChild(el('tr', { class: 'gdw-sub-row' }, [el('td', { colspan: 6, class: 'gdw-muted', text: '추적 중인 하위 폴더가 없습니다' })]));
+    }
+    // 펼친 세부는 1분마다 다시 불러온다
+    window.__gdwTimers.push(setInterval(function () {
+        if (!alive() || document.visibilityState !== 'visible') return;
+        Object.keys(st.expanded).forEach(function (key) {
+            var i = key.indexOf('|');
+            rpc('breakdown', { root: key.slice(0, i), path: key.slice(i + 1) }).then(function (d) { st.breakdown[key] = d; }).catch(function () {});
+        });
+    }, 60000));
 
     function statLine(x) {
         if (!x) return el('small', { text: '아직 확인 전' });

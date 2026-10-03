@@ -2850,6 +2850,9 @@ class Worker:
                 except OSError:
                     pass
                 next_poll = 0.0
+                for watcher in self.watchers:  # '지금 확인'·'바로 읽기': 폴더 비교도 다음 확인 때 바로 돌린다
+                    if isinstance(watcher, DrivePollWatcher):
+                        watcher.next_sweep = 0.0
             if self.rclone and self.rclone.config_changed():
                 log.info("rclone.conf 변경 감지 → 토큰을 다시 읽고 즉시 확인합니다.")
                 for watcher in self.watchers:

@@ -643,6 +643,82 @@ class GDriveWatchProvider(BaseMetadataProvider):
         where = "" if libs else " 이 경로에 걸친 보관함이 없어 스캔은 건너뛰게 됩니다."
         return {"success": True, "message": ("추가" if action == "create" else "삭제") + f"로 반영을 요청했습니다{note}.{where}"}
 
+    # ── 감시 폴더 세부 보기 ──
+    def _rpc_breakdown(self, ctx):
+        """감시 폴더(또는 그 안의 폴더) 바로 아래 폴더별로 추적 항목 수, 최근 변경, 다시 읽는 간격을 보여 준다."""
+        root, base = str(ctx.get("root") or ""), str(ctx.get("path") or "").rstrip("/")
+        runtime = _read_json("runtime.json", {}) or {}
+        info = next((r for r in runtime.get("roots") or [] if r.get("name") == root), {}) or {}
+        if not base:
+            base = str(info.get("local_root") or "").rstrip("/")
+        if not root or not base:
+            return {"success": False, "error": "감시 폴더를 찾을 수 없습니다."}
+        tiers = [(7, int(runtime.get("poll_hot_minutes", 60)) * 60), (14, int(runtime.get("poll_warm_hours", 24)) * 3600),
+                 (30, int(runtime.get("poll_cool_days", 7)) * 86400), (None, int(runtime.get("poll_cold_days", 14)) * 86400)]
+        now = time.time()
+
+        def interval(depth, last_change):
+            if depth <= 2:
+                return 0
+            age = (now - (last_change or 0)) / 86400
+            for limit, iv in tiers:
+                if limit is None or age <= limit:
+                    return iv
+            return tiers[-1][1]
+
+        db = _db()
+        prefix = base + "/"
+        # 바로 아래 폴더 목록 (추적 목록 기준)
+        children = db.execute(
+            "SELECT file_id, path, sig FROM item WHERE root=? AND is_dir=1 AND path >= ? AND path < ? "
+            "AND instr(substr(path, ?), '/')=0 ORDER BY path", (root, prefix, prefix + "\uffff", len(prefix) + 1)).fetchall()
+        files_here = db.execute(
+            "SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND path >= ? AND path < ? AND instr(substr(path, ?), '/')=0",
+            (root, prefix, prefix + "\uffff", len(prefix) + 1)).fetchone()[0]
+        polled = bool(db.execute("SELECT 1 FROM pollfolder WHERE root=? LIMIT 1", (root,)).fetchone())
+        rows = []
+        for child in children[:300]:
+            path = child["path"]
+            lo, hi = path + "/", path + "/\uffff"
+            count = db.execute("SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND path >= ? AND path < ?",
+                               (root, lo, hi)).fetchone()[0]
+            subdirs = db.execute("SELECT COUNT(*) FROM item WHERE root=? AND is_dir=1 AND path >= ? AND path < ? "
+                                 "AND instr(substr(path, ?), '/')=0", (root, lo, hi, len(lo) + 1)).fetchone()[0]
+            last_event = db.execute("SELECT MAX(created) FROM event WHERE root=? AND (path=? OR (path >= ? AND path < ?))",
+                                    (root, path, lo, hi)).fetchone()[0]
+            row = {"path": path, "name": os.path.basename(path), "files": count, "subdirs": subdirs,
+                   "shortcut": (child["sig"] or "").startswith("shortcut:"), "last_event": last_event or ""}
+            if polled:
+                folders = db.execute("SELECT depth, last_change, last_list FROM pollfolder WHERE root=? "
+                                     "AND (path=? OR (path >= ? AND path < ?))", (root, path, lo, hi)).fetchall()
+                buckets = {}
+                for f in folders:
+                    iv = interval(f["depth"], f["last_change"])
+                    buckets[iv] = buckets.get(iv, 0) + 1
+                me = db.execute("SELECT depth, last_change, last_list FROM pollfolder WHERE root=? AND path=?", (root, path)).fetchone()
+                row.update(folders=len(folders), buckets=sorted(buckets.items()),
+                           last_change=max((f["last_change"] or 0) for f in folders) if folders else 0,
+                           last_list=me["last_list"] if me else 0, interval=interval(me["depth"], me["last_change"]) if me else None)
+            rows.append(row)
+        db.close()
+        return {"success": True, "root": root, "path": base, "rows": rows, "files_here": files_here,
+                "polled": polled, "more": max(0, len(children) - 300)}
+
+    def _rpc_force_folder(self, ctx):
+        """폴더 비교: 이 폴더(와 하위)를 다음 비교 때 바로 다시 읽게 한다."""
+        root, path = str(ctx.get("root") or ""), str(ctx.get("path") or "").rstrip("/")
+        if not root or not path:
+            return {"success": False, "error": "폴더를 지정하세요."}
+        db = _db()
+        with db:
+            n = db.execute("UPDATE pollfolder SET last_list=0 WHERE root=? AND (path=? OR (path >= ? AND path < ?))",
+                           (root, path, path + "/", path + "/\uffff")).rowcount
+        db.close()
+        open(_path("wake.flag"), "w").close()
+        if not n:
+            return {"success": False, "error": "폴더 비교 방식으로 추적 중인 폴더가 아닙니다."}
+        return {"success": True, "message": f"폴더 {n:,}개를 다음 비교 때 바로 읽도록 했습니다."}
+
     def _rpc_reset_root(self, ctx):
         name = str(ctx.get("name") or "")
         if not name:
