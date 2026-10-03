@@ -1193,3 +1193,5 @@
 
 .gdw-roots tr.gdw-child-row td:first-child { padding-left: 28px; }
 .gdw-roots tr.gdw-child-row td { background: color-mix(in srgb, var(--app-bg-main) 50%, transparent); }
+
+.gdw-opts .gdw-subhead { grid-column: 1 / -1; margin-top: 6px; font-size: 11.5px; color: var(--app-text-secondary); }

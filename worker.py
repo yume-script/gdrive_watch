@@ -190,6 +190,10 @@ def open_db(path):
         db.execute("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    try:  # v1.16.1: 폴더 자체의 Drive 수정 시각 (안쪽이 바뀌면 깨우기)
+        db.execute("ALTER TABLE pollfolder ADD COLUMN folder_mtime REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     return db
 
 
@@ -1304,7 +1308,7 @@ class DrivePollWatcher(Watcher):
 
     def _crawl_all(self, start):
         """start: [(폴더ID, 경로, 깊이)] 아래 트리 전체 → (항목 {id: (path, is_dir, sig)}, 폴더 {폴더ID: (path, depth, 최근 변경)})"""
-        items, folders, seen = {}, {}, set()
+        items, folders, seen, own = {}, {}, set(), {}
         level = [s for s in start if s[0] not in seen]
         seen.update(s[0] for s in level)
         while level and not STOP:
@@ -1320,32 +1324,53 @@ class DrivePollWatcher(Watcher):
                     if c["follow"] and c["follow"] not in seen:
                         seen.add(c["follow"])
                         nxt.append((c["follow"], c["path"], depth_of[fid] + 1))
-                folders[fid] = (path, depth, newest)
+                        own[c["follow"]] = c["mtime"].timestamp() if c["mtime"] and c["sig"] == "" else 0
+                folders[fid] = (path, depth, newest, own.get(fid, 0))
             level = nxt
         return items, folders
 
     # ── 온도별 주기 ──
     SKELETON_DEPTH = 2      # 감시 폴더에서 이 단계까지의 분류 폴더는 매 주기 확인 (새 작품 폴더가 생기는 곳)
-    HOT_DAYS, WARM_DAYS = 7, 30
-    WARM_INTERVAL, COLD_INTERVAL = 2 * 3600, 24 * 3600
     MAX_FOLDERS_PER_SWEEP = 3000
+    # (마지막 변경 후 경과 일수 상한, 다시 읽는 간격 초) — 설정에서 간격을 바꿀 수 있음
+    tiers = [(7, 3600), (14, 86400), (30, 7 * 86400), (None, 14 * 86400)]
+
+    def set_tiers(self, cfg):
+        self.tiers = [(7, max(10, int(cfg.get("poll_hot_minutes", 60) or 60)) * 60),
+                      (14, max(1, int(cfg.get("poll_warm_hours", 24) or 24)) * 3600),
+                      (30, max(1, int(cfg.get("poll_cool_days", 7) or 7)) * 86400),
+                      (None, max(1, int(cfg.get("poll_cold_days", 14) or 14)) * 86400)]
 
     def _interval(self, depth, last_change, now):
-        if depth <= self.SKELETON_DEPTH or now - last_change <= self.HOT_DAYS * 86400:
+        if depth <= self.SKELETON_DEPTH:
             return 0
-        if now - last_change <= self.WARM_DAYS * 86400:
-            return self.WARM_INTERVAL
-        return self.COLD_INTERVAL
+        age = (now - last_change) / 86400
+        for limit, interval in self.tiers:
+            if limit is None or age <= limit:
+                return interval
+        return self.tiers[-1][1]
+
+    def _tier(self, depth, last_change, now):
+        if depth <= self.SKELETON_DEPTH:
+            return 0
+        age = (now - last_change) / 86400
+        for index, (limit, _) in enumerate(self.tiers, 1):
+            if limit is None or age <= limit:
+                return index
+        return len(self.tiers)
 
     def _save_folders(self, store, folders, now, spread=False):
         import random
         rows = []
-        for fid, (path, depth, last_change) in folders.items():
+        for fid, info in folders.items():
+            path, depth, last_change = info[:3]
+            folder_mtime = info[3] if len(info) > 3 else 0
             interval = self._interval(depth, last_change, now)
             last_list = now - random.uniform(0, interval) if spread and interval else now
-            rows.append((self.name, fid, path, depth, last_change, last_list))
+            rows.append((self.name, fid, path, depth, last_change, last_list, folder_mtime))
         with store.db:
-            store.db.executemany("INSERT OR REPLACE INTO pollfolder VALUES(?,?,?,?,?,?)", rows)
+            store.db.executemany("INSERT OR REPLACE INTO pollfolder(root, folder_id, path, depth, last_change, last_list, "
+                                 "folder_mtime) VALUES(?,?,?,?,?,?,?)", rows)
 
     # ── 한 번의 비교 ──
     def _sweep(self, token):
@@ -1471,7 +1496,7 @@ class DrivePollWatcher(Watcher):
         """온도별로 '지금 다시 볼 차례'인 폴더만 훑어 그 폴더의 바로 아래 항목을 비교한다."""
         now = time.time()
         folders = {r["folder_id"]: dict(r) for r in store.db.execute(
-            "SELECT folder_id, path, depth, last_change, last_list FROM pollfolder WHERE root=?", (self.name,))}
+            "SELECT folder_id, path, depth, last_change, last_list, folder_mtime FROM pollfolder WHERE root=?", (self.name,))}
         due = [f for f in folders.values()
                if now - f["last_list"] >= self._interval(f["depth"], f["last_change"], now) - 30]
         due.sort(key=lambda f: f["last_list"])
@@ -1487,7 +1512,7 @@ class DrivePollWatcher(Watcher):
             return (row["path"], bool(row["is_dir"]), row["sig"] or "") if row else None
 
         events, removed, upserts, moves, new_roots, touched = [], [], [], [], [], {}
-        removed_dirs = []
+        removed_dirs, wake = [], {}
 
         def remap(path):
             """이번 비교에서 이름이 바뀐(이동한) 상위 폴더가 있으면 새 경로로 바꾼다."""
@@ -1517,6 +1542,11 @@ class DrivePollWatcher(Watcher):
                     removed_dirs.append(path)
                 changed = True
             for fid, c in cur.items():
+                if c["is_dir"] and c["follow"] in folders and c["sig"] == "" and c["mtime"]:
+                    # 깨우기: 폴더 자체의 수정 시각이 바뀌었으면(안쪽 변경일 수 있음) 다음 비교 때 바로 읽는다
+                    stamp = c["mtime"].timestamp()
+                    if stamp > (folders[c["follow"]].get("folder_mtime") or 0) + 1:
+                        wake[c["follow"]] = stamp
                 now_v = (c["path"], c["is_dir"], c["sig"])
                 prev = old.get(fid) or lookup(fid)
                 if prev and prev is not old.get(fid):
@@ -1557,13 +1587,25 @@ class DrivePollWatcher(Watcher):
                 else:
                     store.db.execute("UPDATE pollfolder SET last_list=? WHERE root=? AND folder_id=?",
                                      (now, self.name, f["folder_id"]))
-        self._save_folders(store, {fid: (p, d, now) for fid, (p, d, _) in new_folders.items()}, now)
-        counts = {"hot": 0, "warm": 0, "cold": 0}
+        self._save_folders(store, {fid: (v[0], v[1], now, v[3]) for fid, v in new_folders.items()}, now)
+        woken = 0
+        with store.db:
+            for fid, stamp in wake.items():
+                if not (folders[fid].get("folder_mtime") or 0):  # 처음 기록하는 경우는 기준값만 저장
+                    store.db.execute("UPDATE pollfolder SET folder_mtime=? WHERE root=? AND folder_id=?", (stamp, self.name, fid))
+                else:
+                    woken += 1
+                    store.db.execute("UPDATE pollfolder SET folder_mtime=?, last_list=0, last_change=? WHERE root=? AND folder_id=?",
+                                     (stamp, now, self.name, fid))
+        counts = [0] * (len(self.tiers) + 1)
         for f in folders.values():
-            iv = self._interval(f["depth"], f["last_change"], now)
-            counts["hot" if iv == 0 else "warm" if iv == self.WARM_INTERVAL else "cold"] += 1
-        self.last = (f"폴더 비교 (나눠 훑기) · 이번 {len(due):,}/{len(folders):,}개 폴더 · "
-                     f"변경 {self.stat['raw']} → 기록 {self.stat['events']} · 매번 {counts['hot']:,} / 2시간 {counts['warm']:,} / 하루 {counts['cold']:,}")
+            counts[self._tier(f["depth"], f["last_change"], now)] += 1
+
+        def human(seconds):
+            return f"{seconds // 86400}일" if seconds >= 86400 else f"{seconds // 3600}시간" if seconds >= 3600 else f"{seconds // 60}분"
+        tiers = " / ".join([f"매번 {counts[0]:,}"] + [f"{human(iv)} {counts[i]:,}" for i, (_, iv) in enumerate(self.tiers, 1)])
+        self.last = (f"폴더 비교 (나눠 훑기) · 이번 {len(due):,}/{len(folders):,}개 폴더 · 변경 {self.stat['raw']} → 기록 {self.stat['events']}"
+                     + (f" · 깨움 {woken}" if woken else "") + f" · {tiers}")
 
 
 # ─────────────────────────── 로컬 폴더 감시 ───────────────────────────
@@ -2544,6 +2586,7 @@ class Worker:
                 watcher.user_feed = fallback == "userfeed"
                 if isinstance(watcher, DrivePollWatcher):
                     watcher.workers = min(16, max(1, int(cfg.get("drive_workers", 4) or 4)))
+                    watcher.set_tiers(cfg)
                 watcher.verbose = bool(cfg.get("verbose_log"))
                 watchers.append(watcher)
             except Exception as error:
@@ -2620,6 +2663,7 @@ class Worker:
             child.verbose, child.parent = parent.verbose, parent.name
             if isinstance(child, DrivePollWatcher):
                 child.workers = min(16, max(1, int(self.cfg.get("drive_workers", 4) or 4)))
+                child.set_tiers(self.cfg)
             self.watchers.append(child)
             log.info("[%s] 바로가기 하위 감시 시작 (대상 폴더 %s, 드라이브 %s)", name, row["target_id"], row["drive"] or "내 드라이브")
 
@@ -2666,6 +2710,7 @@ class Worker:
                                                    watcher.extensions, watcher.buffer_seconds, watcher.api.timeout)
                     replacement.verbose = watcher.verbose
                     replacement.workers = min(16, max(1, int(self.cfg.get("drive_workers", 4) or 4)))
+                    replacement.set_tiers(self.cfg)
                     replacement.parent = getattr(watcher, "parent", None)
                     self.watchers[self.watchers.index(watcher)] = replacement
                     message = (f"[{watcher.name}] 이 계정은 공유 드라이브 멤버가 아니라 변경 목록을 받을 수 없어, "
