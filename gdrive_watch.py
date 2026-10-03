@@ -28,6 +28,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER_PATH = os.path.join(HERE, "worker.py")
 DATA_DIR = os.path.abspath(os.path.join("plugins", "data", PLUGIN_ID))
 DB_TYPES = ("general", "adult", "audiobook", "video")
+# BookOasis에서 도서(권)로 등록되는 파일. 이 밖의 파일(kavita.yaml, info.xml, series.json, 표지 이미지, 자막 등)은
+# 도서가 아니라 메타데이터라서 DB에 행이 생기지 않는 게 정상이다.
+BOOK_EXTS = {".zip", ".cbz", ".cbr", ".cb7", ".rar", ".7z", ".epub", ".pdf", ".txt", ".mobi", ".azw3",
+             ".mp3", ".m4a", ".m4b", ".flac", ".aac", ".ogg", ".opus", ".wav", ".wma",
+             ".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v", ".ts"}
+
+
+def _is_book_file(path):
+    return os.path.splitext(str(path or ""))[1].lower() in BOOK_EXTS
 LIBRARY_REFRESH_SECONDS = 60
 
 
@@ -372,10 +381,39 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 "stat": dict(stat) if stat else None,
             })
         oldest = db.execute("SELECT MIN(created) FROM event WHERE status IN ('pending','waiting')").fetchone()[0]
+        stale = [dict(r) for r in db.execute("SELECT * FROM event WHERE status='done' AND item_type='file' "
+                                              "AND result LIKE '%\"db_ok\": false%' ORDER BY id DESC LIMIT 200")]
+        stale = [r for r in stale if not _is_book_file(r["removed_path"] if r["action"] == "delete" else r["path"])]
+        if stale:  # 이전 버전에서 메타데이터 파일을 'DB에 없음'으로 표시한 기록을 다시 확인
+            for r in stale:
+                try:
+                    r["result"] = json.loads(r.get("result") or "{}")
+                except ValueError:
+                    r["result"] = {}
+            self._verify_db(db, stale)
         db_missing = db.execute("SELECT COUNT(*) FROM event WHERE status='done' AND result LIKE '%\"db_ok\": false%'").fetchone()[0]
         token_fail = db.execute("SELECT COUNT(*) FROM event WHERE status IN ('failed','pending') AND "
                                 "(message LIKE '%토큰 불일치%' OR message LIKE '%Invalid webhook token%')").fetchone()[0]
+        fallback_all = _read_json("fallback.json", {}) or {}
+        for link in db.execute("SELECT * FROM links ORDER BY parent, path").fetchall():
+            if not any(r["name"] == link["parent"] for r in roots):
+                continue
+            name = f"{link['parent']} › {os.path.basename(link['path'])}"
+            cur = db.execute("SELECT status, error, updated FROM cursor WHERE root=?", (name,)).fetchone()
+            items = db.execute("SELECT COUNT(*) FROM item WHERE root=?", (name,)).fetchone()[0]
+            last = db.execute("SELECT created FROM event WHERE root=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+            stat = db.execute("SELECT * FROM root_stat WHERE root=?", (name,)).fetchone()
+            roots.append({
+                "name": name, "child_of": link["parent"], "mode": "changes", "enabled": True,
+                "local_detect": "", "fallback": fallback_all.get(name, ""), "local_root": link["path"],
+                "drive": link["drive"] or "내 드라이브",
+                "status": cur["status"] if cur else "", "error": cur["error"] if cur else "",
+                "updated": cur["updated"] if cur else "", "items": items,
+                "last_event": last["created"] if last else "", "stat": dict(stat) if stat else None,
+            })
         db.close()
+        order = {r["name"]: i for i, r in enumerate(roots) if not r.get("child_of")}
+        roots.sort(key=lambda r: (order.get(r.get("child_of") or r["name"], 999), 1 if r.get("child_of") else 0, r["name"]))
         warnings = []
         if token_fail:
             warnings.append(f"스캔 요청 {token_fail}건이 WEBHOOK_TOKEN 불일치로 실패했습니다. [감시 설정 > 실행 환경]에서 "
@@ -488,6 +526,15 @@ class GDriveWatchProvider(BaseMetadataProvider):
             if deleting:
                 return (True, "폴더의 도서가 모두 정리됨") if n == 0 else (False, f"폴더 안 도서 {n}권이 아직 남아 있음")
             return (True, f"폴더 안 도서 {n}권 등록됨") if n else (False, "폴더 안에 등록된 도서가 없음")
+        if not _is_book_file(path):
+            # 메타데이터 파일: 그 파일의 도서는 없으므로, 같은 폴더(시리즈)의 도서가 있는지로 확인한다
+            folder = os.path.dirname(path)
+            row = gateway.fetch_one(f"SELECT COUNT(*) AS n FROM books WHERE file_path LIKE %s ESCAPE '!' AND {alive}",
+                                    (self._like_prefix(folder),))
+            n = int((row or {}).get("n") or 0)
+            if n:
+                return True, f"메타데이터 파일 · 같은 폴더 도서 {n}권에 반영"
+            return None, "메타데이터 파일이라 DB 확인 대상이 아님"
         row = gateway.fetch_one(f"SELECT id, library_id, COALESCE(is_deleted, 0) AS gone FROM books WHERE file_path = %s LIMIT 1",
                                 (path,))
         if not row:  # 이미지 폴더형 도서(…/__folder__.imgdir 등)는 경로 아래로 등록된다
@@ -510,9 +557,11 @@ class GDriveWatchProvider(BaseMetadataProvider):
             result = item.get("result") or {}
             if item.get("status") != "done" or checked >= 60:
                 continue
-            if result.get("db_ok") is True:
+            if result.get("db_ok") is True or result.get("db_skip"):
                 continue
-            if result.get("db_ok") is False:
+            meta_fix = (result.get("db_ok") is False and item.get("item_type") == "file"
+                        and not _is_book_file(item.get("removed_path") if item.get("action") == "delete" else item.get("path")))
+            if result.get("db_ok") is False and not meta_fix:
                 try:
                     finished = time.mktime(time.strptime(item.get("finished") or "", "%Y-%m-%dT%H:%M:%S"))
                 except ValueError:
@@ -529,7 +578,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 ok, message = None, f"확인 실패: {error}"
             checked += 1
             if ok is None:
-                result.update(db_msg=message, db_at=now)
+                result.pop("db_ok", None)
+                result.update(db_msg=message, db_at=now, db_skip=message.startswith("메타데이터"))
             else:
                 result.update(db_ok=ok, db_msg=message, db_at=now)
             item["result"] = result
@@ -595,7 +645,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return {"success": False, "error": "루트 이름이 없습니다."}
         db = _db()
         with db:
-            for table in ("cursor", "item", "outside", "receipt", "seedstate"):
+            for table in ("cursor", "item", "outside", "receipt", "seedstate", "pollfolder"):
                 db.execute(f"DELETE FROM {table} WHERE root=?", (name,))
         db.close()
         open(_path("wake.flag"), "w").close()

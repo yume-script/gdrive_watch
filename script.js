@@ -80,7 +80,8 @@
         if (d.version) { ver.textContent = 'v' + d.version; ver.hidden = false; } else { ver.hidden = true; }
         var errs = (d.roots || []).filter(function (r) { return r.enabled && (r.status === 'error' || r.status === 'blocked'); }).length;
         var badge = bind('roots-badge');
-        badge.textContent = (d.roots || []).length + '개' + (errs ? ' · 오류 ' + errs : '');
+        var kids = (d.roots || []).filter(function (r) { return r.child_of; }).length;
+        badge.textContent = ((d.roots || []).length - kids) + '개' + (kids ? ' · 바로가기 ' + kids : '') + (errs ? ' · 오류 ' + errs : '');
         badge.classList.toggle('has-error', errs > 0);
 
         var warn = clear(bind('warnings'));
@@ -108,8 +109,10 @@
             var label = !r.enabled ? '꺼짐' : r.status === 'ready' ? '정상' : r.status === 'blocked' ? '확인 필요로 중지' :
                 r.status === 'error' ? '오류' : r.status === 'seeding' ? '정상' : '첫 확인 대기';
             var since = r.status === 'seeding' && r.updated ? Math.max(0, Math.round((Date.now() - new Date(r.updated).getTime()) / 60000)) : null;
-            tbody.appendChild(el('tr', {}, [
-                el('td', {}, [el('strong', { text: r.name }), el('small', { text: r.local_root })]),
+            tbody.appendChild(el('tr', { class: r.child_of ? 'gdw-child-row' : '' }, [
+                el('td', {}, r.child_of ? [el('strong', { text: '↪ ' + r.name.split(' › ').slice(-1)[0] }),
+                    el('small', { text: '바로가기 대상 (다른 드라이브: ' + r.drive + ') · ' + r.local_root })]
+                    : [el('strong', { text: r.name }), el('small', { text: r.local_root })]),
                 el('td', { text: (r.fallback === 'userfeed' || r.fallback === 'drivepoll') ? 'Drive · 폴더 비교 (변경 목록 사용 불가로 자동 전환)' : r.mode === 'drivepoll' ? 'Drive · 폴더 비교' : r.mode === 'activity' ? (r.fallback ? 'Drive · Changes (Activity 권한 없어 자동 전환)' : 'Drive · Activity') : r.mode === 'local' ? '로컬' + (r.local_detect === 'polling' ? ' · 주기' : r.local_detect === 'inotify' ? ' · 실시간' : '') : 'Drive · Changes' }),
                 el('td', {}, [el('span', { class: 'gdw-tag ' + cls, text: label }),
                     r.error ? el('small', { class: 'gdw-err', text: r.error }) : null,
@@ -229,7 +232,8 @@
     }
     function dbTag(ev) {
         var r = ev.result || {};
-        if (ev.status !== 'done' || (r.db_ok === undefined && !r.db_msg)) return [];
+        if (ev.status !== 'done' || r.db_skip || (r.db_ok === undefined && !r.db_msg)) return [];
+        if (r.db_ok === true && /^메타데이터/.test(r.db_msg || '')) return [el('span', { class: 'gdw-db ok', text: '메타데이터 반영', title: r.db_msg })];
         var cls = r.db_ok === true ? 'ok' : r.db_ok === false ? 'fail' : '';
         var text = r.db_ok === true ? 'DB 확인됨' : r.db_ok === false ? 'DB에 없음' : 'DB 확인 불가';
         if (r.db_ok === false && ev.action === 'delete') text = 'DB에 남아 있음';

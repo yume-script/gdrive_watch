@@ -1190,3 +1190,6 @@
 .gdw-db.ok { color: var(--gdw-ok); border-color: color-mix(in srgb, var(--gdw-ok) 45%, transparent); }
 .gdw-db.ok::before { content: "✓ "; }
 .gdw-db.fail { color: var(--gdw-fail); border-color: color-mix(in srgb, var(--gdw-fail) 45%, transparent); background: color-mix(in srgb, var(--gdw-fail) 10%, transparent); }
+
+.gdw-roots tr.gdw-child-row td:first-child { padding-left: 28px; }
+.gdw-roots tr.gdw-child-row td { background: color-mix(in srgb, var(--app-bg-main) 50%, transparent); }
