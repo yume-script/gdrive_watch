@@ -210,7 +210,9 @@ FOLDER_RULES = {
     "every": ("매 주기", 0),
     "1h": ("1시간", 3600),
     "6h": ("6시간", 6 * 3600),
+    "12h": ("하루 2번", 12 * 3600),
     "1d": ("1일", 86400),
+    "2d": ("2일", 2 * 86400),
     "7d": ("7일", 7 * 86400),
     "30d": ("30일", 30 * 86400),
     "off": ("읽지 않음", None),       # 이 폴더 아래는 다시 읽지 않음 (변경 감지 안 함)
@@ -227,21 +229,40 @@ def folder_rule(rules, rel):
     return best
 
 
-def poll_interval(depth, last_change, now, tiers, skeleton_depth, skeleton_idle_days, rule="auto"):
+# 다시 읽는 간격표: (마지막 변경 뒤 지난 기간 상한(초), 다시 읽는 간격(초)). 0=매 주기
+POLL_TABLE = (
+    (3600, 600),            # 1시간 안: 10분
+    (6 * 3600, 1800),       # 1~6시간: 30분
+    (86400, 3600),          # 6~24시간: 1시간
+    (2 * 86400, 43200),     # 1~2일: 하루 2번
+    (7 * 86400, 86400),     # 2~7일: 하루 1번
+    (15 * 86400, 2 * 86400),  # 7~15일: 2일
+    (30 * 86400, 7 * 86400),  # 16~30일: 7일
+    (None, 30 * 86400),     # 31일 이상: 30일
+)
+# 분류 폴더(새 작품 폴더가 생기는 곳): 1일 안에 바뀌었으면 매 주기, 그 뒤는 일반 폴더와 같음
+SKELETON_TABLE = ((86400, 0),) + POLL_TABLE[3:]
+
+
+def poll_policy(cfg):
+    """처리 옵션 → 간격 계산 기준. skeleton_depth: 이 단계까지는 분류 폴더로 본다."""
+    try:
+        depth = int(cfg.get("poll_skeleton_depth", 2) if cfg.get("poll_skeleton_depth") not in (None, "") else 2)
+    except (TypeError, ValueError):
+        depth = 2
+    return {"skeleton_depth": min(5, max(0, depth)), "table": POLL_TABLE, "skeleton_table": SKELETON_TABLE}
+
+
+def poll_interval(depth, last_change, now, policy, rule="auto"):
     """다시 읽는 간격(초). 0=매 주기, None=읽지 않음."""
-    seconds = FOLDER_RULES.get(rule, FOLDER_RULES["auto"])[1]
     if rule != "auto" and rule in FOLDER_RULES:
-        return seconds
-    age = (now - (last_change or 0)) / 86400
-    if depth <= skeleton_depth:
-        # 분류 폴더(새 작품 폴더가 생기는 곳)는 매 주기 확인. 단, 오래 조용한 분류 폴더는 가장 짧은 단계 간격으로
-        if not skeleton_idle_days or age <= skeleton_idle_days:
-            return 0
-        return tiers[0][1]
-    for limit, interval in tiers:
+        return FOLDER_RULES[rule][1]
+    age = max(0.0, now - (last_change or 0))
+    table = policy["skeleton_table"] if depth <= policy["skeleton_depth"] else policy["table"]
+    for limit, interval in table:
         if limit is None or age <= limit:
             return interval
-    return tiers[-1][1]
+    return table[-1][1]
 
 
 def human_interval(seconds):
@@ -249,6 +270,8 @@ def human_interval(seconds):
         return "읽지 않음"
     if not seconds:
         return "매번"
+    if seconds == 43200:
+        return "하루 2번"
     if seconds >= 86400:
         return f"{seconds // 86400}일"
     if seconds >= 3600:
@@ -1480,26 +1503,18 @@ class DrivePollWatcher(Watcher):
     # ── 온도별 주기 ──
     SKELETON_DEPTH = 2      # 감시 폴더에서 이 단계까지의 분류 폴더는 매 주기 확인 (새 작품 폴더가 생기는 곳)
     MAX_FOLDERS_PER_SWEEP = 3000
-    # (마지막 변경 후 경과 일수 상한, 다시 읽는 간격 초) — 설정에서 간격을 바꿀 수 있음
-    tiers = [(7, 3600), (14, 86400), (30, 7 * 86400), (None, 14 * 86400)]
 
     def set_tiers(self, cfg):
-        self.skeleton_depth = min(5, max(0, int(cfg.get("poll_skeleton_depth", self.SKELETON_DEPTH))))
-        self.skeleton_idle = max(0, int(cfg.get("poll_skeleton_idle_days", 7) or 0))
-        self.tiers = [(7, max(10, int(cfg.get("poll_hot_minutes", 60) or 60)) * 60),
-                      (14, max(1, int(cfg.get("poll_warm_hours", 24) or 24)) * 3600),
-                      (30, max(1, int(cfg.get("poll_cool_days", 7) or 7)) * 86400),
-                      (None, max(1, int(cfg.get("poll_cold_days", 14) or 14)) * 86400)]
+        self.policy = poll_policy(cfg)
 
     def _rule(self, path):
         rel = path[len(self.local_root):].strip("/") if under(path, self.local_root) else path.strip("/")
         return folder_rule(self.cfg.get("folder_rules"), rel)[0]
 
     def _interval(self, depth, last_change, now, path=""):
-        if not hasattr(self, "tiers"):
+        if not hasattr(self, "policy"):
             self.set_tiers({})
-        return poll_interval(depth, last_change, now, self.tiers, self.skeleton_depth, self.skeleton_idle,
-                             self._rule(path) if path else "auto")
+        return poll_interval(depth, last_change, now, self.policy, self._rule(path) if path else "auto")
 
     def _save_folders(self, store, folders, now, spread=False):
         import random
@@ -2701,8 +2716,7 @@ class Worker:
     # 감시기는 그대로 두고 처리 대상(BookOasis)과 알림만 새로 만든다.
     WATCH_KEYS = ("roots", "rclone_path", "rclone_config", "rclone_timeout", "extensions", "buffer_seconds",
                   "api_timeout", "drive_workers", "drive_rps", "ignore_patterns", "verbose_log",
-                  "poll_hot_minutes", "poll_warm_hours", "poll_cool_days", "poll_cold_days",
-                  "poll_skeleton_depth", "poll_skeleton_idle_days")
+                  "poll_skeleton_depth")
 
     @staticmethod
     def _watch_view(cfg, key):

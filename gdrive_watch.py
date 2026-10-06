@@ -256,12 +256,7 @@ DEFAULT_WATCH = {
     "full_scan_guard_minutes": 10,
     "drive_workers": 4,
     "drive_rps": 3,
-    "poll_hot_minutes": 60,
-    "poll_warm_hours": 24,
-    "poll_cool_days": 7,
-    "poll_cold_days": 14,
     "poll_skeleton_depth": 2,
-    "poll_skeleton_idle_days": 7,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -746,12 +741,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         if not root or not base:
             return {"success": False, "error": "감시 폴더를 찾을 수 없습니다."}
         worker = _load_worker_module()
-        tiers = [(7, max(10, int(runtime.get("poll_hot_minutes", 60) or 60)) * 60),
-                 (14, max(1, int(runtime.get("poll_warm_hours", 24) or 24)) * 3600),
-                 (30, max(1, int(runtime.get("poll_cool_days", 7) or 7)) * 86400),
-                 (None, max(1, int(runtime.get("poll_cold_days", 14) or 14)) * 86400)]
-        skeleton = min(5, max(0, int(runtime.get("poll_skeleton_depth", 2))))
-        idle = max(0, int(runtime.get("poll_skeleton_idle_days", 7) or 0))
+        policy = worker.poll_policy(runtime)
         rules = info.get("folder_rules") or {}
         top = str(info.get("local_root") or "").rstrip("/")
         now = time.time()
@@ -760,8 +750,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return path[len(top):].strip("/") if top and worker.under(path, top) else path.strip("/")
 
         def interval(depth, last_change, path):
-            return worker.poll_interval(depth, last_change, now, tiers, skeleton, idle,
-                                        worker.folder_rule(rules, rel(path))[0])
+            return worker.poll_interval(depth, last_change, now, policy, worker.folder_rule(rules, rel(path))[0])
 
         db = _db()
         prefix = base + "/"
@@ -797,7 +786,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 row.update(folders=len(folders),
                            buckets=sorted(([-1 if k is None else k, v] for k, v in buckets.items()), key=lambda x: (x[0] < 0, x[0])),
                            last_change=max((f["last_change"] or 0) for f in folders) if folders else 0,
-                           last_list=me["last_list"] if me else 0,
+                           last_list=me["last_list"] if me else 0, own_change=me["last_change"] if me else 0,
                            interval=(-1 if (iv := interval(me["depth"], me["last_change"], path)) is None else iv) if me else None,
                            rule=key, rule_own=origin is not None and origin == rel(path),
                            rule_from=origin if origin is not None and origin != rel(path) else "")
@@ -847,7 +836,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return {"success": True, "message": f"[{name}] 규칙을 지우고 자동(최근 변경 기준)으로 되돌렸습니다."}
         if key == "off":
             return {"success": True, "message": f"[{name}] 폴더와 하위는 더 이상 다시 읽지 않습니다. 이 아래의 변경은 감지되지 않습니다."}
-        when = "매 주기" if key == "every" else f"{label}마다"
+        when = "매 주기" if key == "every" else label if key == "12h" else f"{label}마다"
         return {"success": True, "message": f"[{name}] 폴더와 하위를 {when} 다시 읽습니다 (더 깊은 폴더에 따로 정한 규칙이 우선)."}
 
     def _rpc_force_folder(self, ctx):
@@ -1062,12 +1051,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "full_scan_guard_minutes": max(0, int(watch.get("full_scan_guard_minutes", 10) or 0)),
             "drive_workers": min(16, max(1, int(watch.get("drive_workers", 4) or 4))),
             "drive_rps": min(50.0, max(0.5, float(watch.get("drive_rps", 3) or 3))),
-            "poll_hot_minutes": max(10, int(watch.get("poll_hot_minutes", 60) or 60)),
-            "poll_warm_hours": max(1, int(watch.get("poll_warm_hours", 24) or 24)),
-            "poll_cool_days": max(1, int(watch.get("poll_cool_days", 7) or 7)),
-            "poll_cold_days": max(1, int(watch.get("poll_cold_days", 14) or 14)),
-            "poll_skeleton_depth": min(5, max(0, int(watch.get("poll_skeleton_depth", 2) if watch.get("poll_skeleton_depth") not in (None, "") else 2))),
-            "poll_skeleton_idle_days": max(0, int(watch.get("poll_skeleton_idle_days", 7) if watch.get("poll_skeleton_idle_days") not in (None, "") else 7)),
+            "poll_skeleton_depth": _load_worker_module().poll_policy(watch)["skeleton_depth"],
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),

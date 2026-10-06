@@ -143,6 +143,7 @@
     function human(seconds) {
         if (seconds === -1) return '읽지 않음';
         if (seconds === 0) return '매 주기';
+        if (seconds === 43200) return '하루 2번';
         if (seconds >= 86400) return Math.round(seconds / 86400) + '일마다';
         if (seconds >= 3600) return Math.round(seconds / 3600) + '시간마다';
         return Math.round(seconds / 60) + '분마다';
@@ -185,7 +186,7 @@
                 var current = x.rule_own ? x.rule : (x.rule_from ? 'inherit' : 'auto');
                 var opts = [];
                 if (x.rule_from) opts.push(['inherit', '상위 규칙 따름 (' + x.rule_from.split('/').pop() + ')']);
-                d.rule_options.forEach(function (o) { opts.push([o[0], o[0] === 'auto' ? '자동 (최근 변경 기준)' : o[1] + (o[0] === 'off' ? '' : (o[0] === 'every' ? '' : '마다'))]); });
+                d.rule_options.forEach(function (o) { opts.push([o[0], o[0] === 'auto' ? '자동 (최근 변경 기준)' : o[1] + (o[0] === 'off' || o[0] === 'every' || o[0] === '12h' ? '' : '마다')]); });
                 ruleBox = el('select', { class: 'gdw-rule', title: '이 폴더와 하위 전체를 다시 읽는 간격 (더 깊은 폴더에 따로 지정한 규칙이 우선)',
                     onchange: function (e) {
                         var v = e.target.value;
@@ -202,7 +203,11 @@
                     el('small', { text: '폴더 ' + x.subdirs.toLocaleString() + '개' + (x.shortcut ? ' · 바로가기' : '') })]),
                 el('td', {}, [d.polled ? el('span', { class: 'gdw-tag' + (x.rule_own || x.rule_from ? ' is-rule' : ''), text: tierText }) : null, ruleBox]),
                 el('td', {}, [
-                    d.polled && x.last_change ? el('small', { text: '최근 변경 ' + ago(x.last_change) + (x.last_list ? ' · 마지막으로 읽음 ' + ago(x.last_list) : ' · 다음 비교 때 읽음') }) : null,
+                    d.polled && (x.own_change || x.last_change) ? el('small', {
+                        title: '다시 읽는 간격은 "이 폴더" 바로 아래가 마지막으로 바뀐 시점으로 정합니다. 하위 최근 변경은 더 깊은 폴더까지 포함한 값입니다.',
+                        text: '이 폴더 변경 ' + (x.own_change ? ago(x.own_change) : '-')
+                            + (x.last_change && x.last_change > (x.own_change || 0) + 60 ? ' · 하위 최근 변경 ' + ago(x.last_change) : '')
+                            + (x.last_list ? ' · 마지막으로 읽음 ' + ago(x.last_list) : ' · 다음 비교 때 읽음') }) : null,
                     buckets ? el('small', { text: buckets }) : null]),
                 el('td', { text: x.files.toLocaleString() }),
                 el('td', { text: shortTime(x.last_event) || '-' }),
