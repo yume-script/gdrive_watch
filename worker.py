@@ -279,6 +279,18 @@ def human_interval(seconds):
     return f"{seconds // 60}분"
 
 
+WEBHOOK_HELP = ("알림 주소는 디스코드 웹훅(https://discord.com/api/webhooks/…) 또는 "
+                "구글 앱스 스크립트 웹 앱(https://script.google.com/macros/s/…/exec?…) 형식이어야 합니다.")
+
+
+def webhook_allowed(url):
+    """알림을 보낼 수 있는 주소: 디스코드 웹훅, 또는 디스코드로 중계하는 구글 앱스 스크립트 웹 앱(쿼리 포함 가능)."""
+    url = str(url or "").strip()
+    if url.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
+        return True
+    return bool(re.match(r"^https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec(\?.*)?$", url))
+
+
 def utcnow():
     return datetime.now(timezone.utc)
 

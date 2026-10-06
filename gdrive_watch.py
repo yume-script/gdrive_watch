@@ -1027,8 +1027,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
             except re.error as error:
                 return {"success": False, "error": f"무시 패턴 오류: {line} ({error})"}
         webhook = str(watch.get("discord_webhook") or "").strip()
-        if webhook and not webhook.startswith("https://discord.com/api/webhooks/") and not webhook.startswith("https://discordapp.com/api/webhooks/"):
-            return {"success": False, "error": "디스코드 웹훅 주소는 https://discord.com/api/webhooks/… 형식이어야 합니다."}
+        if webhook and not _load_worker_module().webhook_allowed(webhook):
+            return {"success": False, "error": _load_worker_module().WEBHOOK_HELP}
         vfs = []
         for index, rule in enumerate(watch.get("vfs") or [], 1):
             local, rc = str(rule.get("local") or "").strip(), str(rule.get("rc") or "").strip()
@@ -1648,8 +1648,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
         url = str(ctx.get("url") or self._watch().get("discord_webhook") or "").strip()
         if not url:
             return {"success": False, "error": "웹훅 주소를 입력하세요."}
-        if not url.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
-            return {"success": False, "error": "디스코드 웹훅 주소는 https://discord.com/api/webhooks/… 형식이어야 합니다."}
+        if not worker.webhook_allowed(url):
+            return {"success": False, "error": worker.WEBHOOK_HELP}
         notifier = worker.Notifier({"discord_webhook": url})
         status = notifier.post([{"title": "드라이브 변경 감시 · 알림 시험", "color": 3447003,
                                  "description": "이 채널로 처리 결과(반영됨·실패)와 감시 오류를 알립니다."}])
