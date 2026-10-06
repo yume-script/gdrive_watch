@@ -45,8 +45,15 @@ DEFAULT_IGNORE_PATTERNS = [
 ]
 
 
-def ignored(path):
-    return bool(path) and any(p.search(path) for p in IGNORE)
+def ignored(path, root=""):
+    """무시 패턴은 감시 폴더 기준 상대 경로('/하위/파일')에 적용한다.
+    (마운트 경로 자체에 '.'로 시작하는 폴더나 [업로드]가 있어도 모든 기록이 무시되지 않게)"""
+    if not path:
+        return False
+    root = (root or "").rstrip("/")
+    if root and (path == root or path.startswith(root + "/")):
+        path = path[len(root):] or "/"
+    return any(p.search(path) for p in IGNORE)
 
 
 def compile_patterns(lines):
@@ -58,50 +65,104 @@ def compile_patterns(lines):
     return out
 
 
-def _cron_field(field, value, low, high):
+CRON_NAMES = {
+    3: {n: i for i, n in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)},
+    4: {n: i for i, n in enumerate(("sun", "mon", "tue", "wed", "thu", "fri", "sat"))},
+}
+CRON_LIMITS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+CRON_ALIASES = {"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *",
+                "@weekly": "0 0 * * 0", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"}
+
+
+def _cron_parts(field, index):
+    """cron 한 필드를 (시작, 끝, 간격) 목록으로. 잘못된 값이면 ValueError."""
+    low, high = CRON_LIMITS[index]
+    names = CRON_NAMES.get(index, {})
+
+    def num(text):
+        text = text.strip().lower()
+        if text in names:
+            return names[text]
+        if not text.isdigit():
+            raise ValueError(f"'{text}'")
+        value = int(text)
+        if not low <= value <= high:
+            raise ValueError(f"{value}는 {low}~{high} 범위 밖")
+        return value
+
+    parts = []
     for part in field.split(","):
+        if not part:
+            raise ValueError("빈 항목")
         step = 1
         if "/" in part:
-            part, step = part.split("/", 1)
-            step = max(1, int(step))
-        if part in ("*", ""):
+            part, step_text = part.split("/", 1)
+            if not step_text.isdigit() or int(step_text) < 1:
+                raise ValueError(f"간격 '{step_text}'")
+            step = int(step_text)
+        if part == "*":
             start, end = low, high
         elif "-" in part:
-            start, end = (int(x) for x in part.split("-", 1))
+            a, b = part.split("-", 1)
+            start, end = num(a), num(b)
+            if start > end:
+                raise ValueError(f"범위 {part}")
         else:
-            start = end = int(part)
+            start = end = num(part)
             if step > 1:
                 end = high
-        if start <= value <= end and (value - start) % step == 0:
-            return True
-    return False
+        parts.append((start, end, step))
+    return parts
+
+
+def _cron_field(field, value, index):
+    return any(start <= value <= end and (value - start) % step == 0 for start, end, step in _cron_parts(field, index))
+
+
+def cron_fields(cron):
+    text = str(cron or "").strip()
+    return CRON_ALIASES.get(text.lower(), text).split()
+
+
+def validate_cron(cron):
+    """표준 5필드 cron 검사. 문제가 없으면 '' , 있으면 이유."""
+    fields = cron_fields(cron)
+    if len(fields) != 5:
+        return f"필드가 5개여야 합니다 (분 시 일 월 요일), 지금 {len(fields)}개"
+    labels = ("분", "시", "일", "월", "요일")
+    for index, field in enumerate(fields):
+        try:
+            _cron_parts(field, index)
+        except ValueError as error:
+            return f"{labels[index]} 필드 '{field}' 오류: {error}"
+    return ""
 
 
 def cron_matches(cron, when):
     """표준 5필드 cron(분 시 일 월 요일)이 이 시각(분 단위)에 실행되는지."""
-    fields = str(cron or "").split()
-    if len(fields) < 5:
+    fields = cron_fields(cron)
+    if len(fields) != 5:
         return False
     try:
-        minute, hour, dom, month, dow = fields[:5]
+        minute, hour, dom, month, dow = fields
         weekday = (when.weekday() + 1) % 7  # cron: 0=일요일
-        dow_ok = _cron_field(dow, weekday, 0, 7) or (weekday == 0 and _cron_field(dow, 7, 0, 7))
-        dom_ok = _cron_field(dom, when.day, 1, 31)
+        dow_ok = _cron_field(dow, weekday, 4) or (weekday == 0 and _cron_field(dow, 7, 4))
+        dom_ok = _cron_field(dom, when.day, 2)
         if dom != "*" and dow != "*":
             day_ok = dom_ok or dow_ok  # 둘 다 지정되면 cron은 OR로 본다
         else:
             day_ok = dom_ok and dow_ok
-        return (_cron_field(minute, when.minute, 0, 59) and _cron_field(hour, when.hour, 0, 23)
-                and _cron_field(month, when.month, 1, 12) and day_ok)
+        return (_cron_field(minute, when.minute, 0) and _cron_field(hour, when.hour, 1)
+                and _cron_field(month, when.month, 3) and day_ok)
     except ValueError:
         return False
 
 
-def screen_event(event):
+def screen_event(event, root=""):
     """무시 패턴에 걸리는 쪽 경로를 빼서 이벤트를 다듬는다.
     [업로드] → 실제 폴더로 옮긴 경우는 '추가'로, 실제 폴더 → [업로드]는 '삭제'로 바뀐다. 둘 다 걸리면 None."""
     path, removed = event["path"], event["removed_path"]
-    bad_new, bad_old = ignored(path), ignored(removed)
+    bad_new, bad_old = ignored(path, root), ignored(removed, root)
     if event["action"] == "delete":
         return None if bad_old else event
     if bad_new and (not removed or bad_old or removed == path):
@@ -136,6 +197,65 @@ def under(path, root):
     return not root or path == root or path.startswith(root + "/")
 
 
+def prefix_upper(prefix):
+    """'a/b/'로 시작하는 경로 범위의 상한 ('a/b0'). SQLite는 UTF-8 바이트순으로 비교하므로
+    path >= 'a/b/' AND path < 'a/b0' 가 정확히 'a/b/' 하위 전체이며 ix_item_path 인덱스를 탄다."""
+    return prefix[:-1] + "0"
+
+
+# ── 폴더 비교: 폴더별 다시 읽는 간격 ──
+# 폴더 규칙(감시 폴더 기준 상대 경로 → 간격). 그 폴더와 하위 전체에 적용되고, 더 깊은 규칙이 우선한다.
+FOLDER_RULES = {
+    "auto": ("자동", -1),            # 최근 변경 시점에 따라 (기본)
+    "every": ("매 주기", 0),
+    "1h": ("1시간", 3600),
+    "6h": ("6시간", 6 * 3600),
+    "1d": ("1일", 86400),
+    "7d": ("7일", 7 * 86400),
+    "30d": ("30일", 30 * 86400),
+    "off": ("읽지 않음", None),       # 이 폴더 아래는 다시 읽지 않음 (변경 감지 안 함)
+}
+
+
+def folder_rule(rules, rel):
+    """rel(감시 폴더 기준 상대 경로, 루트는 '')에 적용되는 규칙 키와 규칙이 걸린 경로."""
+    best = ("auto", None)
+    for path, key in (rules or {}).items():
+        path = str(path).strip("/")
+        if key in FOLDER_RULES and under(rel, path) and (best[1] is None or len(path) > len(best[1])):
+            best = (key, path)
+    return best
+
+
+def poll_interval(depth, last_change, now, tiers, skeleton_depth, skeleton_idle_days, rule="auto"):
+    """다시 읽는 간격(초). 0=매 주기, None=읽지 않음."""
+    seconds = FOLDER_RULES.get(rule, FOLDER_RULES["auto"])[1]
+    if rule != "auto" and rule in FOLDER_RULES:
+        return seconds
+    age = (now - (last_change or 0)) / 86400
+    if depth <= skeleton_depth:
+        # 분류 폴더(새 작품 폴더가 생기는 곳)는 매 주기 확인. 단, 오래 조용한 분류 폴더는 가장 짧은 단계 간격으로
+        if not skeleton_idle_days or age <= skeleton_idle_days:
+            return 0
+        return tiers[0][1]
+    for limit, interval in tiers:
+        if limit is None or age <= limit:
+            return interval
+    return tiers[-1][1]
+
+
+def human_interval(seconds):
+    if seconds is None:
+        return "읽지 않음"
+    if not seconds:
+        return "매번"
+    if seconds >= 86400:
+        return f"{seconds // 86400}일"
+    if seconds >= 3600:
+        return f"{seconds // 3600}시간"
+    return f"{seconds // 60}분"
+
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -168,12 +288,14 @@ CREATE TABLE IF NOT EXISTS event(
     status TEXT DEFAULT 'pending', message TEXT DEFAULT '', result TEXT DEFAULT '', finished TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS ix_event_ready ON event(status, ready_at);
 CREATE INDEX IF NOT EXISTS ix_event_created ON event(created);
+CREATE INDEX IF NOT EXISTS ix_event_path ON event(root, path);
 CREATE TABLE IF NOT EXISTS vfs_map(root TEXT PRIMARY KEY, rc TEXT, fs TEXT, remote TEXT, detected TEXT);
 CREATE TABLE IF NOT EXISTS seedstate(root TEXT PRIMARY KEY, started TEXT);
 CREATE TABLE IF NOT EXISTS links(parent TEXT, shortcut_id TEXT, target_id TEXT, path TEXT, drive TEXT, checked TEXT,
                                  PRIMARY KEY(parent, shortcut_id));
 CREATE TABLE IF NOT EXISTS pollfolder(root TEXT, folder_id TEXT, path TEXT, depth INTEGER, last_change REAL, last_list REAL,
                                       PRIMARY KEY(root, folder_id));
+CREATE INDEX IF NOT EXISTS ix_pollfolder_path ON pollfolder(root, path);
 CREATE TABLE IF NOT EXISTS link_checked(parent TEXT, target_id TEXT, drive TEXT, PRIMARY KEY(parent, target_id));
 CREATE TABLE IF NOT EXISTS root_stat(root TEXT PRIMARY KEY, checked TEXT, raw INTEGER, outside INTEGER, ext INTEGER,
                                      same INTEGER, events INTEGER, note TEXT, elapsed REAL);
@@ -284,11 +406,11 @@ class Store:
                 prefix = old + "/"
                 if new:
                     self.db.execute(
-                        "UPDATE item SET path = ? || substr(path, ?) WHERE root=? AND substr(path, 1, ?)=?",
-                        (new, len(old) + 1, root, len(prefix), prefix))
+                        "UPDATE item SET path = ? || substr(path, ?) WHERE root=? AND path >= ? AND path < ?",
+                        (new, len(old) + 1, root, prefix, prefix_upper(prefix)))
                 else:
-                    self.db.execute("DELETE FROM item WHERE root=? AND substr(path, 1, ?)=?",
-                                    (root, len(prefix), prefix))
+                    self.db.execute("DELETE FROM item WHERE root=? AND path >= ? AND path < ?",
+                                    (root, prefix, prefix_upper(prefix)))
             if new:
                 self._upsert(root, file_id, cur)
             else:
@@ -348,6 +470,9 @@ class Store:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
         with self.db:
             self.db.execute("DELETE FROM event WHERE status IN ('done','skipped','timeout') AND created<?", (cutoff,))
+            # 끝내 실패한 기록은 보관 기간의 두 배까지 남겨 두고 정리 (대기 중인 기록은 지우지 않음)
+            old = (datetime.now() - timedelta(days=days * 2)).isoformat(timespec="seconds")
+            self.db.execute("DELETE FROM event WHERE status='failed' AND created<?", (old,))
 
 
 # ─────────────────────────── rclone / Drive 인증 ───────────────────────────
@@ -989,13 +1114,14 @@ class Watcher:
             self.stat["ext"] += 1
             self.trace("확장자 제외: %s", event["path"] or event["removed_path"])
             event = None
-        elif screen_event(event) is None:
-            self.stat["ext"] += 1
-            self.trace("무시 패턴: %s", event["path"] or event["removed_path"])
-            event = None
         else:
-            event = screen_event(event)
-            self.stat["events"] += 1
+            screened = screen_event(event, self.local_root)
+            if screened is None:
+                self.stat["ext"] += 1
+                self.trace("무시 패턴: %s", event["path"] or event["removed_path"])
+            else:
+                self.stat["events"] += 1
+            event = screened
         self.store.record(self.name, file_id, prev, cur, event, self.buffer_seconds, receipt)
         if event:
             log.info("[%s] %s %s %s%s", self.name, event["action"], event["item_type"], event["path"],
@@ -1005,6 +1131,7 @@ class Watcher:
 
 class ChangesWatcher(Watcher):
     mode = "changes"
+    CATCHUP_SECONDS = 90
 
     def poll(self):
         token, status = self.store.get_cursor(self.name)
@@ -1039,6 +1166,8 @@ class ChangesWatcher(Watcher):
             log.info("[%s] %s", self.name, self.stat["note"])
             return 0
         accepted = 0
+        started = time.monotonic()
+        self.behind = False
         while token and not STOP:
             try:
                 data = self.api.get(
@@ -1059,6 +1188,11 @@ class ChangesWatcher(Watcher):
             if data.get("nextPageToken"):
                 token = data["nextPageToken"]
                 self.store.save_cursor(self.name, prefix + token)
+                if time.monotonic() - started > self.CATCHUP_SECONDS:
+                    # 밀린 변경이 많을 때 한 번에 다 따라잡지 않는다: 그동안 쌓인 기록 처리(VFS·스캔)가 밀리지 않도록
+                    self.behind = True
+                    self.stat["note"] = "밀린 변경을 따라잡는 중 (곧 이어서 확인)"
+                    break
                 continue
             self.store.save_cursor(self.name, prefix + (data.get("newStartPageToken") or token))
             break
@@ -1122,8 +1256,16 @@ class ActivityWatcher(Watcher):
             now = stamp(utcnow())
             self.begin(json.dumps({"start": now, "floor": now}))
             return 0
-        cursor = json.loads(token)
-        start = parse_time(cursor["start"])
+        try:
+            cursor = json.loads(token)
+            start = parse_time(cursor["start"])
+        except (ValueError, TypeError, KeyError):
+            # 다른 방식(Changes·폴더 비교)에서 쓰던 체크포인트가 남은 경우: 지금부터 새로 시작 (추적 목록은 그대로)
+            now = stamp(utcnow())
+            self.store.save_cursor(self.name, json.dumps({"start": now, "floor": now}))
+            self.stat["note"] = "감시 방식이 바뀌어 새 시작점에서 다시 시작 (이후 변경부터 감지)"
+            log.info("[%s] %s", self.name, self.stat["note"])
+            return 0
         end = parse_time(cursor["end"]) if cursor.get("end") else utcnow() - self.delay
         accepted = 0
         while end > start and not STOP:
@@ -1342,28 +1484,22 @@ class DrivePollWatcher(Watcher):
     tiers = [(7, 3600), (14, 86400), (30, 7 * 86400), (None, 14 * 86400)]
 
     def set_tiers(self, cfg):
+        self.skeleton_depth = min(5, max(0, int(cfg.get("poll_skeleton_depth", self.SKELETON_DEPTH))))
+        self.skeleton_idle = max(0, int(cfg.get("poll_skeleton_idle_days", 7) or 0))
         self.tiers = [(7, max(10, int(cfg.get("poll_hot_minutes", 60) or 60)) * 60),
                       (14, max(1, int(cfg.get("poll_warm_hours", 24) or 24)) * 3600),
                       (30, max(1, int(cfg.get("poll_cool_days", 7) or 7)) * 86400),
                       (None, max(1, int(cfg.get("poll_cold_days", 14) or 14)) * 86400)]
 
-    def _interval(self, depth, last_change, now):
-        if depth <= self.SKELETON_DEPTH:
-            return 0
-        age = (now - last_change) / 86400
-        for limit, interval in self.tiers:
-            if limit is None or age <= limit:
-                return interval
-        return self.tiers[-1][1]
+    def _rule(self, path):
+        rel = path[len(self.local_root):].strip("/") if under(path, self.local_root) else path.strip("/")
+        return folder_rule(self.cfg.get("folder_rules"), rel)[0]
 
-    def _tier(self, depth, last_change, now):
-        if depth <= self.SKELETON_DEPTH:
-            return 0
-        age = (now - last_change) / 86400
-        for index, (limit, _) in enumerate(self.tiers, 1):
-            if limit is None or age <= limit:
-                return index
-        return len(self.tiers)
+    def _interval(self, depth, last_change, now, path=""):
+        if not hasattr(self, "tiers"):
+            self.set_tiers({})
+        return poll_interval(depth, last_change, now, self.tiers, self.skeleton_depth, self.skeleton_idle,
+                             self._rule(path) if path else "auto")
 
     def _save_folders(self, store, folders, now, spread=False):
         import random
@@ -1371,7 +1507,7 @@ class DrivePollWatcher(Watcher):
         for fid, info in folders.items():
             path, depth, last_change = info[:3]
             folder_mtime = info[3] if len(info) > 3 else 0
-            interval = self._interval(depth, last_change, now)
+            interval = self._interval(depth, last_change, now, path)
             last_list = now - random.uniform(0, interval) if spread and interval else now
             rows.append((self.name, fid, path, depth, last_change, last_list, folder_mtime))
         with store.db:
@@ -1487,7 +1623,7 @@ class DrivePollWatcher(Watcher):
             if not self.relevant(ev):
                 self.stat["ext"] += 1
                 continue
-            screened = screen_event(ev)
+            screened = screen_event(ev, self.local_root)
             if screened is None:
                 self.stat["ext"] += 1
                 continue
@@ -1498,9 +1634,9 @@ class DrivePollWatcher(Watcher):
             for old_path, new_path in prefix_moves:  # 폴더 이름 변경·이동: 하위 경로 일괄 치환
                 store.db.execute("UPDATE pollfolder SET path=? WHERE root=? AND path=?", (new_path, self.name, old_path))
                 pre = old_path + "/"
-                for table, col in (("item", "path"), ("pollfolder", "path")):
-                    store.db.execute(f"UPDATE {table} SET {col} = ? || substr({col}, ?) WHERE root=? AND substr({col}, 1, ?)=?",
-                                     (new_path, len(old_path) + 1, self.name, len(pre), pre))
+                for table, col in (("item", "path"), ("pollfolder", "path")):  # pollfolder는 ix_pollfolder_path
+                    store.db.execute(f"UPDATE {table} SET {col} = ? || substr({col}, ?) WHERE root=? AND {col} >= ? AND {col} < ?",
+                                     (new_path, len(old_path) + 1, self.name, pre, prefix_upper(pre)))
             store.db.executemany("DELETE FROM item WHERE root=? AND file_id=?", [(self.name, fid) for fid in removed])
             store.db.executemany(
                 "INSERT OR REPLACE INTO item(root, file_id, path, is_dir, sig) VALUES(?,?,?,?,?)",
@@ -1517,8 +1653,9 @@ class DrivePollWatcher(Watcher):
         now = time.time()
         folders = {r["folder_id"]: dict(r) for r in store.db.execute(
             "SELECT folder_id, path, depth, last_change, last_list, folder_mtime FROM pollfolder WHERE root=?", (self.name,))}
-        due = [f for f in folders.values()
-               if now - f["last_list"] >= self._interval(f["depth"], f["last_change"], now) - 30]
+        intervals = {fid: self._interval(f["depth"], f["last_change"], now, f["path"]) for fid, f in folders.items()}
+        due = [f for fid, f in folders.items()
+               if intervals[fid] is not None and now - f["last_list"] >= intervals[fid] - 30]
         due.sort(key=lambda f: f["last_list"])
         due = due[:self.MAX_FOLDERS_PER_SWEEP]
         due.sort(key=lambda f: f["depth"])  # 상위 폴더부터: 이름이 바뀐 폴더를 먼저 알아야 하위 경로를 맞출 수 있다
@@ -1545,8 +1682,8 @@ class DrivePollWatcher(Watcher):
         for f in due:
             prefix = f["path"].rstrip("/") + "/"
             old = {r["file_id"]: (remap(r["path"]), bool(r["is_dir"]), r["sig"] or "") for r in store.db.execute(
-                "SELECT file_id, path, is_dir, sig FROM item WHERE root=? AND substr(path, 1, ?)=? "
-                "AND instr(substr(path, ?), '/')=0", (self.name, len(prefix), prefix, len(prefix) + 1))}
+                "SELECT file_id, path, is_dir, sig FROM item WHERE root=? AND path >= ? AND path < ? "
+                "AND instr(substr(path, ?), '/')=0", (self.name, prefix, prefix_upper(prefix), len(prefix) + 1))}
             cur = {c["id"]: dict(c, path=remap(c["path"])) for c in listed.get(f["folder_id"], [])}
             if f["folder_id"] in self.skipped:
                 touched[f["folder_id"]] = "skip"  # 조회 실패: 다음 비교 때 다시
@@ -1568,9 +1705,9 @@ class DrivePollWatcher(Watcher):
             for fid, c in cur.items():
                 if c["is_dir"] and c["follow"] in folders and c["sig"] == "" and c["mtime"]:
                     # 깨우기: 폴더 자체의 수정 시각이 바뀌었으면(안쪽 변경일 수 있음) 다음 비교 때 바로 읽는다
-                    stamp = c["mtime"].timestamp()
-                    if stamp > (folders[c["follow"]].get("folder_mtime") or 0) + 1:
-                        wake[c["follow"]] = stamp
+                    folder_time = c["mtime"].timestamp()
+                    if folder_time > (folders[c["follow"]].get("folder_mtime") or 0) + 1:
+                        wake[c["follow"]] = folder_time
                 now_v = (c["path"], c["is_dir"], c["sig"])
                 prev = old.get(fid) or lookup(fid)
                 if prev and prev is not old.get(fid):
@@ -1594,14 +1731,14 @@ class DrivePollWatcher(Watcher):
         for path in removed_dirs:
             pre = path + "/"
             removed += [r["file_id"] for r in store.db.execute(
-                "SELECT file_id FROM item WHERE root=? AND substr(path, 1, ?)=?", (self.name, len(pre), pre))]
+                "SELECT file_id FROM item WHERE root=? AND path >= ? AND path < ?", (self.name, pre, prefix_upper(pre)))]
         new_items, new_folders = self._crawl_all(new_roots) if new_roots else ({}, {})
         upserts += [(fid,) + v for fid, v in new_items.items()]
         self._commit(store, events, removed, upserts, moves)
         with store.db:
             for path in removed_dirs:
-                store.db.execute("DELETE FROM pollfolder WHERE root=? AND (path=? OR substr(path, 1, ?)=?)",
-                                 (self.name, path, len(path) + 1, path + "/"))
+                store.db.execute("DELETE FROM pollfolder WHERE root=? AND (path=? OR (path >= ? AND path < ?))",
+                                 (self.name, path, path + "/", prefix_upper(path + "/")))
             for f in due:
                 if touched.get(f["folder_id"]) == "skip":
                     continue
@@ -1614,20 +1751,18 @@ class DrivePollWatcher(Watcher):
         self._save_folders(store, {fid: (v[0], v[1], now, v[3]) for fid, v in new_folders.items()}, now)
         woken = 0
         with store.db:
-            for fid, stamp in wake.items():
+            for fid, folder_time in wake.items():
                 if not (folders[fid].get("folder_mtime") or 0):  # 처음 기록하는 경우는 기준값만 저장
-                    store.db.execute("UPDATE pollfolder SET folder_mtime=? WHERE root=? AND folder_id=?", (stamp, self.name, fid))
+                    store.db.execute("UPDATE pollfolder SET folder_mtime=? WHERE root=? AND folder_id=?", (folder_time, self.name, fid))
                 else:
                     woken += 1
                     store.db.execute("UPDATE pollfolder SET folder_mtime=?, last_list=0, last_change=? WHERE root=? AND folder_id=?",
-                                     (stamp, now, self.name, fid))
-        counts = [0] * (len(self.tiers) + 1)
-        for f in folders.values():
-            counts[self._tier(f["depth"], f["last_change"], now)] += 1
-
-        def human(seconds):
-            return f"{seconds // 86400}일" if seconds >= 86400 else f"{seconds // 3600}시간" if seconds >= 3600 else f"{seconds // 60}분"
-        tiers = " / ".join([f"매번 {counts[0]:,}"] + [f"{human(iv)} {counts[i]:,}" for i, (_, iv) in enumerate(self.tiers, 1)])
+                                     (folder_time, now, self.name, fid))
+        counts = {}
+        for value in intervals.values():
+            counts[value] = counts.get(value, 0) + 1
+        order = sorted(counts, key=lambda v: float("inf") if v is None else v)
+        tiers = " / ".join(f"{human_interval(v)} {counts[v]:,}" for v in order)
         self.last = (f"폴더 비교 (나눠 훑기) · 이번 {len(due):,}/{len(folders):,}개 폴더 · 변경 {self.stat['raw']} → 기록 {self.stat['events']}"
                      + (f" · 깨움 {woken}" if woken else "") + (f" · 조회 실패 {len(self.skipped)}(다음에 다시)" if self.skipped else "")
                      + f" · {tiers}")
@@ -1723,7 +1858,9 @@ class Inotify:
                     continue
                 directory = self.wds.get(wd)
                 if directory:
-                    self.callback(directory if mask & (self.IN_DELETE_SELF | self.IN_MOVE_SELF) else directory)
+                    # 감시 중인 폴더 자체가 지워지거나 옮겨졌으면 그 상위 폴더를 다시 비교한다
+                    self.callback(posixpath.dirname(directory) if mask & (self.IN_DELETE_SELF | self.IN_MOVE_SELF)
+                                  else directory)
 
     def close(self):
         self.closed = True
@@ -1765,7 +1902,7 @@ class LocalWatcher(Watcher):
 
     # ── 공통 ──
     def included(self, rel, is_dir):
-        if ignored(self.abs(rel)):
+        if ignored("/" + rel if rel else ""):
             return False
         parts = rel.split("/")
         for part in parts[:-1] if not is_dir else parts:
@@ -2086,7 +2223,8 @@ class VfsRule:
         parts = urlsplit(self.rc)
         if parts.username:
             cfg = dict(cfg, user=cfg.get("user") or unquote(parts.username), **{"pass": cfg.get("pass") or unquote(parts.password or "")})
-            self.rc = urlunsplit((parts.scheme, parts.hostname + (f":{parts.port}" if parts.port else ""), parts.path, "", ""))
+            host = parts.netloc.rsplit("@", 1)[-1]  # IPv6 주소의 [ ]와 포트를 그대로 유지
+            self.rc = urlunsplit((parts.scheme, host, parts.path, "", ""))
         self.fs = str(cfg.get("fs") or "").strip()
         if self.fs and not self.fs.endswith(":"):
             self.fs += ":"
@@ -2559,6 +2697,21 @@ class Worker:
     def activity(self, text):
         self.state["activity"] = text
 
+    # 감시기 구성에 영향을 주는 설정. 이 밖의 값(보관함 목록·cron·VFS·알림·스캔 설정)만 바뀌면
+    # 감시기는 그대로 두고 처리 대상(BookOasis)과 알림만 새로 만든다.
+    WATCH_KEYS = ("roots", "rclone_path", "rclone_config", "rclone_timeout", "extensions", "buffer_seconds",
+                  "api_timeout", "drive_workers", "drive_rps", "ignore_patterns", "verbose_log",
+                  "poll_hot_minutes", "poll_warm_hours", "poll_cool_days", "poll_cold_days",
+                  "poll_skeleton_depth", "poll_skeleton_idle_days")
+
+    @staticmethod
+    def _watch_view(cfg, key):
+        """비교용 값. 폴더별 주기 규칙(folder_rules)은 감시기를 다시 만들지 않고 바로 바꿔 끼우므로 뺀다."""
+        value = cfg.get(key)
+        if key == "roots":
+            value = [{k: v for k, v in r.items() if k != "folder_rules"} for r in value or []]
+        return value
+
     def load(self):
         mtime = os.path.getmtime(self.runtime_path)
         if mtime == self.runtime_mtime:
@@ -2567,7 +2720,20 @@ class Worker:
         self.runtime_mtime = mtime
         with open(self.runtime_path, encoding="utf-8") as handle:
             cfg = json.load(handle)
-        self.cfg = cfg
+        old_cfg, self.cfg = self.cfg, cfg
+        if not first and self.rclone and all(self._watch_view(old_cfg, k) == self._watch_view(cfg, k) for k in self.WATCH_KEYS):
+            rules = {r.get("name"): r.get("folder_rules") or {} for r in cfg.get("roots") or []}
+            for watcher in self.watchers:
+                if watcher.name in rules:
+                    watcher.cfg["folder_rules"] = rules[watcher.name]
+            self.notifier = Notifier(cfg)
+            self.rclone.rc_sources = rc_sources(cfg.get("vfs"), cfg.get("libraries"))
+            skip_vfs = self.target.skip_vfs if self.target else set()
+            self.target = BookOasis(cfg, cfg.get("libraries"), cfg.get("vfs"), self.store)
+            self.target.skip_vfs = skip_vfs
+            log.info("설정 적용(감시기 유지): 보관함 경로 %d개, VFS 규칙 %d개",
+                     len(self.target.libraries), len(self.target.vfs.rules))
+            return False
         rclone = Rclone(cfg.get("rclone_path") or "rclone", cfg.get("rclone_config") or "",
                         int(cfg.get("rclone_timeout", 60)))
         ext = str(cfg.get("extensions") or "").strip()
@@ -2616,6 +2782,14 @@ class Worker:
                 watchers.append(watcher)
             except Exception as error:
                 log.error("[%s] 감시 설정 오류: %s", root.get("name"), error)
+        # 진행 중인 폴더 비교 스레드는 새 감시기에 넘겨, 끝나기 전에는 같은 폴더를 중복으로 훑지 않게 한다
+        previous = {w.name: w for w in self.watchers}
+        for watcher in watchers:
+            old = previous.get(watcher.name)
+            if isinstance(watcher, DrivePollWatcher) and isinstance(old, DrivePollWatcher):
+                watcher.thread = old.thread
+                if old.cfg == watcher.cfg:
+                    watcher.next_sweep = old.next_sweep  # 같은 폴더 설정이면 다음 비교 시각도 그대로
         self.watchers = watchers
         self.locals = locals_
         self.rclone = rclone
@@ -2775,6 +2949,8 @@ class Worker:
                 self.store.save_stat(watcher.name, watcher.stat, time.monotonic() - one)
             except sqlite3.Error:
                 pass
+            if time.monotonic() - one > 20:
+                self.process()  # 오래 걸린 감시기 뒤에는 그동안 처리할 차례가 된 기록을 먼저 처리
         lines += [local.last if local.last.startswith(local.name) else f"{local.name}: {local.last}" for local in self.locals]
         for local in self.locals:
             if local.last.startswith(("오류", "확인 필요")) or ": 오류" in local.last or "확인 필요" in local.last:
@@ -2863,6 +3039,8 @@ class Worker:
             if now >= next_poll:
                 self.collect()
                 interval = max(15, int(self.cfg.get("poll_seconds", 60)))
+                if any(getattr(w, "behind", False) for w in self.watchers):
+                    interval = 5  # 밀린 변경을 따라잡는 중: 기록을 처리한 뒤 곧바로 이어서 확인
                 next_poll = time.monotonic() + interval
                 self.state["next_poll"] = (datetime.now() + timedelta(seconds=interval)).isoformat(timespec="seconds")
             self.process()

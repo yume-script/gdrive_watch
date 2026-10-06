@@ -1208,3 +1208,7 @@
 .gdw-roots tr.gdw-sub-row td { background: color-mix(in srgb, var(--app-bg-main) 60%, transparent); font-size: 12px; padding-top: 7px; padding-bottom: 7px; }
 .gdw-roots tr.gdw-sub-row td small { margin-top: 1px; }
 .gdw-roots tr.gdw-sub-row .gdw-name span:last-child { color: var(--app-text-primary); font-weight: 600; }
+
+/* 폴더별 다시 읽는 간격 규칙 (v1.18.0) */
+.gdw select.gdw-rule { display: block; margin-top: 4px; width: auto; max-width: 170px; font-size: 11.5px; padding: 2px 6px; height: auto; }
+.gdw-tag.is-rule { color: var(--app-primary, var(--gdw-ok)); border-color: color-mix(in srgb, var(--app-primary, var(--gdw-ok)) 45%, transparent); background: color-mix(in srgb, var(--app-primary, var(--gdw-ok)) 10%, transparent); }

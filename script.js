@@ -64,6 +64,8 @@
     // ───────── 현황 ─────────
     function loadStatus() {
         if (!alive()) return;
+        var focused = document.activeElement;
+        if (focused && focused.classList && focused.classList.contains('gdw-rule')) return; // 간격을 고르는 중에는 다시 그리지 않음
         rpc('status').then(renderStatus).catch(function (e) { bind('activity').textContent = '상태 조회 실패: ' + e.message; });
     }
     function renderStatus(d) {
@@ -139,6 +141,7 @@
 
     // ───────── 감시 폴더 세부 (폴더별 펼치기) ─────────
     function human(seconds) {
+        if (seconds === -1) return '읽지 않음';
         if (seconds === 0) return '매 주기';
         if (seconds >= 86400) return Math.round(seconds / 86400) + '일마다';
         if (seconds >= 3600) return Math.round(seconds / 3600) + '시간마다';
@@ -177,12 +180,27 @@
             var expander = x.subdirs ? el('button', { type: 'button', class: 'gdw-expander' + (open ? ' is-open' : ''),
                 'aria-label': '세부 보기', onclick: function () { toggleBreakdown(root, x.path, level + 1); } }) : el('span', { class: 'gdw-expander-gap' });
             var tierText = d.polled ? (x.interval === null || x.interval === undefined ? '-' : human(x.interval)) : '';
+            var ruleBox = null;
+            if (d.polled && d.rule_options) {
+                var current = x.rule_own ? x.rule : (x.rule_from ? 'inherit' : 'auto');
+                var opts = [];
+                if (x.rule_from) opts.push(['inherit', '상위 규칙 따름 (' + x.rule_from.split('/').pop() + ')']);
+                d.rule_options.forEach(function (o) { opts.push([o[0], o[0] === 'auto' ? '자동 (최근 변경 기준)' : o[1] + (o[0] === 'off' ? '' : (o[0] === 'every' ? '' : '마다'))]); });
+                ruleBox = el('select', { class: 'gdw-rule', title: '이 폴더와 하위 전체를 다시 읽는 간격 (더 깊은 폴더에 따로 지정한 규칙이 우선)',
+                    onchange: function (e) {
+                        var v = e.target.value;
+                        if (v === 'off' && !confirm(x.name + ' 아래는 다시 읽지 않아 변경을 감지하지 않습니다. 계속할까요?')) { e.target.value = current; return; }
+                        act('set_folder_rule', { root: root, path: x.path, rule: v }).then(function () {
+                            rpc('breakdown', { root: root, path: path }).then(function (nd) { st.breakdown[key] = nd; loadStatus(); });
+                        });
+                    } }, opts.map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === current) op.selected = true; return op; }));
+            }
             var buckets = d.polled && x.buckets && x.buckets.length > 1
                 ? '하위 ' + x.buckets.map(function (b) { return human(b[0]) + ' ' + b[1].toLocaleString(); }).join(' / ') : '';
             tbody.appendChild(el('tr', { class: 'gdw-sub-row' }, [
                 el('td', pad, [el('div', { class: 'gdw-name' }, [expander, el('span', { text: (x.shortcut ? '↪ ' : '') + x.name })]),
                     el('small', { text: '폴더 ' + x.subdirs.toLocaleString() + '개' + (x.shortcut ? ' · 바로가기' : '') })]),
-                el('td', {}, [d.polled ? el('span', { class: 'gdw-tag', text: tierText }) : null]),
+                el('td', {}, [d.polled ? el('span', { class: 'gdw-tag' + (x.rule_own || x.rule_from ? ' is-rule' : ''), text: tierText }) : null, ruleBox]),
                 el('td', {}, [
                     d.polled && x.last_change ? el('small', { text: '최근 변경 ' + ago(x.last_change) + (x.last_list ? ' · 마지막으로 읽음 ' + ago(x.last_list) : ' · 다음 비교 때 읽음') }) : null,
                     buckets ? el('small', { text: buckets }) : null]),
@@ -616,7 +634,7 @@
             else if (a === 'retry_selected') { if (!pickedIds().length) return toast('재시도할 기록을 선택하세요.', true); act('retry', { ids: pickedIds() }); st.picked = {}; }
             else if (a === 'retry_failed') act('retry', { all_failed: true });
             else if (a === 'delete_selected') { if (!pickedIds().length) return toast('삭제할 기록을 선택하세요.', true); if (confirm(pickedIds().length + '건을 삭제할까요?')) { act('delete', { ids: pickedIds() }); st.picked = {}; } }
-            else if (a === 'clear_done') { if (confirm('반영됨·보관함 밖 기록을 모두 지울까요?')) act('delete', { clear: 'done' }); }
+            else if (a === 'clear_done') { if (confirm('반영됨·보관함 밖 기록을 모두 지울까요? (시간 초과·실패 기록은 남깁니다)')) act('delete', { clear: 'done' }); }
             else if (a === 'prev') { st.page = Math.max(1, st.page - 1); loadEvents(); }
             else if (a === 'next') { st.page += 1; loadEvents(); }
             else if (a === 'add_root') { st.watch.roots.push({ name: '', mode: 'changes', source_remote: '', root_id: '', local_root: '', seed: true, enabled: true }); renderRoots(); }
@@ -703,11 +721,11 @@
             if (document.visibilityState === 'visible') fn();
         };
     }
-    window.__gdwTimers.push(setInterval(tick(loadStatus), 5000));
+    window.__gdwTimers.push(setInterval(tick(loadStatus), 15000));
     window.__gdwTimers.push(setInterval(tick(function () {
         if (st.tab === 'events' && st.page === 1) loadEvents();
         else if (st.tab === 'log') loadLog();
-    }), 10000));
+    }), 15000));
 
     loadStatus();
     loadEvents();

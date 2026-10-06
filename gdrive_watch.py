@@ -55,8 +55,14 @@ def _read_json(name, default=None):
 def _write_json(name, data):
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp = _path(name) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
+    # 토큰·계정 정보가 들어갈 수 있으므로 소유자만 읽고 쓰게 만든다 (0600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
     os.replace(tmp, _path(name))
 
 
@@ -89,33 +95,42 @@ def _start_worker():
         os.remove(_path("stop.flag"))
     except OSError:
         pass
-    out = open(_path("worker.out"), "ab")
-    kwargs = {"stdin": subprocess.DEVNULL, "stdout": out, "stderr": out, "cwd": DATA_DIR, "close_fds": True}
-    if os.name == "nt":
-        kwargs["creationflags"] = 0x00000200 | 0x00000008  # NEW_PROCESS_GROUP | DETACHED_PROCESS
-        subprocess.Popen([sys.executable, WORKER_PATH, DATA_DIR], **kwargs)
-    else:
-        # --daemon: 워커가 fork 후 런처는 즉시 종료 → BookOasis 프로세스에 좀비가 남지 않음
-        launcher = subprocess.Popen([sys.executable, WORKER_PATH, DATA_DIR, "--daemon"],
-                                    start_new_session=True, **kwargs)
-        launcher.wait(timeout=15)
-    out.close()
+    with open(_path("worker.out"), "ab") as out:
+        kwargs = {"stdin": subprocess.DEVNULL, "stdout": out, "stderr": out, "cwd": DATA_DIR, "close_fds": True}
+        if os.name == "nt":
+            kwargs["creationflags"] = 0x00000200 | 0x00000008  # NEW_PROCESS_GROUP | DETACHED_PROCESS
+            subprocess.Popen([sys.executable, WORKER_PATH, DATA_DIR], **kwargs)
+        else:
+            # --daemon: 워커가 fork 후 런처는 즉시 종료 → BookOasis 프로세스에 좀비가 남지 않음
+            launcher = subprocess.Popen([sys.executable, WORKER_PATH, DATA_DIR, "--daemon"],
+                                        start_new_session=True, **kwargs)
+            launcher.wait(timeout=15)
     return True
 
 
-def _stop_worker(disable=True):
+def _pid_is_worker(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            cmd = handle.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return False
+    return "worker.py" in cmd and DATA_DIR in cmd
+
+
+def _stop_worker(disable=True, wait=10):
     os.makedirs(DATA_DIR, exist_ok=True)
     open(_path("stop.flag"), "w").close()
     if disable:
         open(_path("disabled.flag"), "w").close()  # 자동 시작 억제 (사용자가 직접 중지)
     beat = _read_json("heartbeat.json", {}) or {}
     pid = int(beat.get("pid") or 0)
-    if pid and os.name != "nt":
+    # 살아 있는 워커이고 pid가 정말 worker.py일 때만 신호를 보낸다 (pid 재사용 대비)
+    if pid and os.name != "nt" and _worker_alive() and _pid_is_worker(pid):
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-    for _ in range(20):
+    for _ in range(int(wait * 2)):
         if not _worker_alive():
             return True
         time.sleep(0.5)
@@ -185,23 +200,46 @@ def _plugin_version():
         return ""
 
 
+_WORKER_MODULE = {"mtime": None, "module": None}
+_SCHEMA_READY = {"key": None}
+
+
 def _load_worker_module():
-    spec = importlib.util.spec_from_file_location("gdrive_watch_worker", WORKER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """worker.py는 크므로 한 번만 읽고, 파일이 바뀌었을 때(업데이트)만 다시 읽는다."""
+    try:
+        mtime = os.path.getmtime(WORKER_PATH)
+    except OSError:
+        mtime = None
+    if _WORKER_MODULE["module"] is None or _WORKER_MODULE["mtime"] != mtime:
+        spec = importlib.util.spec_from_file_location("gdrive_watch_worker", WORKER_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _WORKER_MODULE.update(mtime=mtime, module=module)
+    return _WORKER_MODULE["module"]
 
 
 def _db():
     os.makedirs(DATA_DIR, exist_ok=True)
-    db = sqlite3.connect(_path("state.db"), timeout=30)
+    path = _path("state.db")
+    db = sqlite3.connect(path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=30000")
-    db.executescript(_load_worker_module().SCHEMA)
     try:
-        db.execute("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
+        st = os.stat(path)
+        key = (st.st_ino, st.st_dev, os.path.getmtime(WORKER_PATH))
+    except OSError:
+        key = None
+    if key is None or _SCHEMA_READY["key"] != key:  # 스키마 준비는 DB 파일/워커 버전마다 한 번
+        try:
+            db.executescript(_load_worker_module().SCHEMA)
+            try:
+                db.execute("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+        except Exception:
+            db.close()
+            raise
+        _SCHEMA_READY["key"] = key
     return db
 
 
@@ -222,6 +260,8 @@ DEFAULT_WATCH = {
     "poll_warm_hours": 24,
     "poll_cool_days": 7,
     "poll_cold_days": 14,
+    "poll_skeleton_depth": 2,
+    "poll_skeleton_idle_days": 7,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
@@ -265,9 +305,21 @@ class GDriveWatchProvider(BaseMetadataProvider):
     # ── 설정/런타임 ──
     ENV_KEYS = ("RCLONE_PATH", "RCLONE_CONFIG", "BOOKOASIS_URL", "WEBHOOK_TOKEN", "AUTO_START")
 
+    def _plugin_cfg(self):
+        """환경설정 화면의 플러그인 설정. 저장(set_plugin_config)과 같은 게이트웨이 API로 읽고,
+        안 되는 버전이면 기본 클래스의 get_plugin_config로 읽는다."""
+        try:
+            return dict(self.get_db_gateway("general").get_plugin_config(self.id) or {})
+        except Exception:
+            pass
+        try:
+            return dict(self.get_plugin_config("general", default={}) or {})
+        except Exception:
+            return {}
+
     def _raw_env(self):
         """플러그인 설정(환경설정 화면) 위에 카테고리 탭에서 저장한 값을 덮어쓴다."""
-        cfg = dict(self.get_plugin_config("general", default={}) or {})
+        cfg = self._plugin_cfg()
         env = (_read_json("watch.json", {}) or {}).get("env") or {}
         for key in self.ENV_KEYS:
             if key in env and (env[key] not in ("", None) or key in ("RCLONE_CONFIG", "WEBHOOK_TOKEN")):
@@ -347,11 +399,14 @@ class GDriveWatchProvider(BaseMetadataProvider):
             from flask import session
             if session.get("role") != "admin":
                 return {"success": False, "error": "관리자만 사용할 수 있습니다."}
-        except Exception:
-            pass
+        except Exception as error:
+            # 권한을 확인할 수 없으면 거부 (검사가 깨졌을 때 통과시키지 않음)
+            return {"success": False, "error": f"권한을 확인할 수 없습니다: {type(error).__name__}"}
         handler = getattr(self, f"_rpc_{action_id}", None)
         if not handler:
             return {"success": False, "error": f"알 수 없는 동작: {action_id}"}
+        if action_id not in ("status", "events", "log", "breakdown", "schedules", "get_watch"):
+            GDriveWatchProvider._HEAVY["data"] = None  # 상태를 바꾸는 동작 뒤에는 집계를 다시 계산
         try:
             return handler(context or {})
         except Exception as error:
@@ -364,6 +419,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             alive = _start_worker() or _worker_alive()
         beat = _read_json("heartbeat.json", {}) or {}
         db = _db()
+        heavy = self._status_heavy(db)
         counts = {row["status"]: row["n"] for row in db.execute("SELECT status, COUNT(*) n FROM event GROUP BY status")}
         today = time.strftime("%Y-%m-%d")
         today_counts = {row["status"]: row["n"] for row in db.execute(
@@ -372,7 +428,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         for root in runtime.get("roots") or []:
             name = root.get("name")
             cur = db.execute("SELECT status, error, updated FROM cursor WHERE root=?", (name,)).fetchone()
-            items = db.execute("SELECT COUNT(*) FROM item WHERE root=?", (name,)).fetchone()[0]
+            items = heavy["items"].get(name, 0)
             last = db.execute("SELECT created FROM event WHERE root=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
             stat = db.execute("SELECT * FROM root_stat WHERE root=?", (name,)).fetchone()
             roots.append({
@@ -385,26 +441,15 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 "stat": dict(stat) if stat else None,
             })
         oldest = db.execute("SELECT MIN(created) FROM event WHERE status IN ('pending','waiting')").fetchone()[0]
-        stale = [dict(r) for r in db.execute("SELECT * FROM event WHERE status='done' AND item_type='file' "
-                                              "AND result LIKE '%\"db_ok\": false%' ORDER BY id DESC LIMIT 200")]
-        stale = [r for r in stale if not _is_book_file(r["removed_path"] if r["action"] == "delete" else r["path"])]
-        if stale:  # 이전 버전에서 메타데이터 파일을 'DB에 없음'으로 표시한 기록을 다시 확인
-            for r in stale:
-                try:
-                    r["result"] = json.loads(r.get("result") or "{}")
-                except ValueError:
-                    r["result"] = {}
-            self._verify_db(db, stale)
-        db_missing = db.execute("SELECT COUNT(*) FROM event WHERE status='done' AND result LIKE '%\"db_ok\": false%'").fetchone()[0]
-        token_fail = db.execute("SELECT COUNT(*) FROM event WHERE status IN ('failed','pending') AND "
-                                "(message LIKE '%토큰 불일치%' OR message LIKE '%Invalid webhook token%')").fetchone()[0]
+        db_missing = heavy["db_missing"]
+        token_fail = heavy["token_fail"]
         fallback_all = _read_json("fallback.json", {}) or {}
         for link in db.execute("SELECT * FROM links ORDER BY parent, path").fetchall():
             if not any(r["name"] == link["parent"] for r in roots):
                 continue
             name = f"{link['parent']} › {os.path.basename(link['path'])}"
             cur = db.execute("SELECT status, error, updated FROM cursor WHERE root=?", (name,)).fetchone()
-            items = db.execute("SELECT COUNT(*) FROM item WHERE root=?", (name,)).fetchone()[0]
+            items = heavy["items"].get(name, 0)
             last = db.execute("SELECT created FROM event WHERE root=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
             stat = db.execute("SELECT * FROM root_stat WHERE root=?", (name,)).fetchone()
             roots.append({
@@ -446,6 +491,35 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 "libraries": len(runtime.get("libraries") or []), "auto_start": runtime.get("auto_start"),
                 "version": _plugin_version(), "db_missing": db_missing}
 
+    _HEAVY = {"ts": 0, "data": None, "migrated": False}
+
+    def _status_heavy(self, db, ttl=30):
+        """상태 화면의 무거운 집계(항목 수, LIKE 검색)는 30초 동안 재사용한다."""
+        cache = GDriveWatchProvider._HEAVY
+        if cache["data"] is not None and time.time() - cache["ts"] < ttl:
+            return cache["data"]
+        if not cache["migrated"]:  # 이전 버전에서 메타데이터 파일을 'DB에 없음'으로 표시한 기록 정리 (프로세스당 1회)
+            cache["migrated"] = True
+            stale = [dict(r) for r in db.execute("SELECT * FROM event WHERE status='done' AND item_type='file' "
+                                                  "AND result LIKE '%\"db_ok\": false%' ORDER BY id DESC LIMIT 200")]
+            stale = [r for r in stale if not _is_book_file(r["removed_path"] if r["action"] == "delete" else r["path"])]
+            for r in stale:
+                try:
+                    r["result"] = json.loads(r.get("result") or "{}")
+                except ValueError:
+                    r["result"] = {}
+            if stale:
+                self._verify_db(db, stale)
+        data = {
+            "items": {row[0]: row[1] for row in db.execute("SELECT root, COUNT(*) FROM item GROUP BY root")},
+            "db_missing": db.execute("SELECT COUNT(*) FROM event WHERE status='done' "
+                                     "AND result LIKE '%\"db_ok\": false%'").fetchone()[0],
+            "token_fail": db.execute("SELECT COUNT(*) FROM event WHERE status IN ('failed','pending') AND "
+                                     "(message LIKE '%토큰 불일치%' OR message LIKE '%Invalid webhook token%')").fetchone()[0],
+        }
+        cache.update(ts=time.time(), data=data)
+        return data
+
     def _rpc_start(self, ctx):
         self._clear_disabled()
         self._sync_runtime(force_libraries=True)
@@ -457,11 +531,24 @@ class GDriveWatchProvider(BaseMetadataProvider):
         return {"success": True, "message": "감시를 중지했습니다." if ok else "중지 요청을 보냈습니다. (진행 중인 작업이 끝나면 종료)"}
 
     def _rpc_restart(self, ctx):
-        _stop_worker(disable=False)
+        # 진행 중인 스캔 요청(최대 300초)이 있으면 바로 안 죽을 수 있다 → 종료를 확인한 뒤에만 시작
+        stopped = _stop_worker(disable=False, wait=40)
         self._clear_disabled()
         self._sync_runtime(force_libraries=True)
-        _start_worker()
-        return {"success": True, "message": "감시를 다시 시작했습니다."}
+        if not stopped:
+            try:
+                os.remove(_path("stop.flag"))  # 남겨 두면 진행 중 작업이 끝난 뒤 워커가 그냥 멈춘다
+            except OSError:
+                pass
+            return {"success": False, "error": "워커가 진행 중인 작업을 마치지 못해 다시 시작하지 못했습니다. "
+                                               "기존 워커는 계속 실행됩니다. 잠시 뒤 다시 시도하세요."}
+        if not _start_worker():
+            return {"success": False, "error": "워커를 시작하지 못했습니다. 로그를 확인하세요."}
+        for _ in range(10):
+            if _worker_alive():
+                return {"success": True, "message": "감시를 다시 시작했습니다."}
+            time.sleep(0.5)
+        return {"success": False, "error": "워커를 시작했지만 실행이 확인되지 않습니다. 로그를 확인하세요."}
 
     def _rpc_poll_now(self, ctx):
         self._sync_runtime(force_libraries=True)
@@ -559,7 +646,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         checked = 0
         for item in items:
             result = item.get("result") or {}
-            if item.get("status") != "done" or checked >= 60:
+            if item.get("status") != "done" or checked >= 20:
                 continue
             if result.get("db_ok") is True or result.get("db_skip"):
                 continue
@@ -609,7 +696,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         db = _db()
         with db:
             if ctx.get("clear") == "done":
-                n = db.execute("DELETE FROM event WHERE status IN ('done','skipped','timeout')").rowcount
+                n = db.execute("DELETE FROM event WHERE status IN ('done','skipped')").rowcount
             else:
                 ids = [int(i) for i in ctx.get("ids") or []]
                 marks = ",".join("?" * len(ids)) or "NULL"
@@ -631,7 +718,12 @@ class GDriveWatchProvider(BaseMetadataProvider):
             note = " (아직 마운트에 남아 있어 사라질 때까지 기다립니다)"
         else:
             note = ""
-        is_dir = os.path.isdir(path) if exists else (not os.path.splitext(path)[1])
+        if exists:
+            is_dir = os.path.isdir(path)
+        elif ctx.get("item_type") in ("file", "directory"):
+            is_dir = ctx["item_type"] == "directory"
+        else:  # 아직 안 보이는 경로: 책 확장자(.zip·.epub 등)일 때만 파일로 본다 ('Vol.1' 같은 폴더 이름 대비)
+            is_dir = not _is_book_file(path) and not path.lower().endswith((".yaml", ".xml", ".json", ".txt"))
         libs = [lib for lib in self._libraries() for r in lib["roots"] if worker.under(path, r.rstrip("/"))]
         db = _db()
         with db:
@@ -653,33 +745,38 @@ class GDriveWatchProvider(BaseMetadataProvider):
             base = str(info.get("local_root") or "").rstrip("/")
         if not root or not base:
             return {"success": False, "error": "감시 폴더를 찾을 수 없습니다."}
-        tiers = [(7, int(runtime.get("poll_hot_minutes", 60)) * 60), (14, int(runtime.get("poll_warm_hours", 24)) * 3600),
-                 (30, int(runtime.get("poll_cool_days", 7)) * 86400), (None, int(runtime.get("poll_cold_days", 14)) * 86400)]
+        worker = _load_worker_module()
+        tiers = [(7, max(10, int(runtime.get("poll_hot_minutes", 60) or 60)) * 60),
+                 (14, max(1, int(runtime.get("poll_warm_hours", 24) or 24)) * 3600),
+                 (30, max(1, int(runtime.get("poll_cool_days", 7) or 7)) * 86400),
+                 (None, max(1, int(runtime.get("poll_cold_days", 14) or 14)) * 86400)]
+        skeleton = min(5, max(0, int(runtime.get("poll_skeleton_depth", 2))))
+        idle = max(0, int(runtime.get("poll_skeleton_idle_days", 7) or 0))
+        rules = info.get("folder_rules") or {}
+        top = str(info.get("local_root") or "").rstrip("/")
         now = time.time()
 
-        def interval(depth, last_change):
-            if depth <= 2:
-                return 0
-            age = (now - (last_change or 0)) / 86400
-            for limit, iv in tiers:
-                if limit is None or age <= limit:
-                    return iv
-            return tiers[-1][1]
+        def rel(path):
+            return path[len(top):].strip("/") if top and worker.under(path, top) else path.strip("/")
+
+        def interval(depth, last_change, path):
+            return worker.poll_interval(depth, last_change, now, tiers, skeleton, idle,
+                                        worker.folder_rule(rules, rel(path))[0])
 
         db = _db()
         prefix = base + "/"
         # 바로 아래 폴더 목록 (추적 목록 기준)
         children = db.execute(
             "SELECT file_id, path, sig FROM item WHERE root=? AND is_dir=1 AND path >= ? AND path < ? "
-            "AND instr(substr(path, ?), '/')=0 ORDER BY path", (root, prefix, prefix + "\uffff", len(prefix) + 1)).fetchall()
+            "AND instr(substr(path, ?), '/')=0 ORDER BY path", (root, prefix, prefix[:-1] + "0", len(prefix) + 1)).fetchall()
         files_here = db.execute(
             "SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND path >= ? AND path < ? AND instr(substr(path, ?), '/')=0",
-            (root, prefix, prefix + "\uffff", len(prefix) + 1)).fetchone()[0]
+            (root, prefix, prefix[:-1] + "0", len(prefix) + 1)).fetchone()[0]
         polled = bool(db.execute("SELECT 1 FROM pollfolder WHERE root=? LIMIT 1", (root,)).fetchone())
         rows = []
         for child in children[:300]:
             path = child["path"]
-            lo, hi = path + "/", path + "/\uffff"
+            lo, hi = path + "/", path + "0"
             count = db.execute("SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND path >= ? AND path < ?",
                                (root, lo, hi)).fetchone()[0]
             subdirs = db.execute("SELECT COUNT(*) FROM item WHERE root=? AND is_dir=1 AND path >= ? AND path < ? "
@@ -689,20 +786,69 @@ class GDriveWatchProvider(BaseMetadataProvider):
             row = {"path": path, "name": os.path.basename(path), "files": count, "subdirs": subdirs,
                    "shortcut": (child["sig"] or "").startswith("shortcut:"), "last_event": last_event or ""}
             if polled:
-                folders = db.execute("SELECT depth, last_change, last_list FROM pollfolder WHERE root=? "
+                folders = db.execute("SELECT path, depth, last_change, last_list FROM pollfolder WHERE root=? "
                                      "AND (path=? OR (path >= ? AND path < ?))", (root, path, lo, hi)).fetchall()
                 buckets = {}
                 for f in folders:
-                    iv = interval(f["depth"], f["last_change"])
+                    iv = interval(f["depth"], f["last_change"], f["path"])
                     buckets[iv] = buckets.get(iv, 0) + 1
                 me = db.execute("SELECT depth, last_change, last_list FROM pollfolder WHERE root=? AND path=?", (root, path)).fetchone()
-                row.update(folders=len(folders), buckets=sorted(buckets.items()),
+                key, origin = worker.folder_rule(rules, rel(path))
+                row.update(folders=len(folders),
+                           buckets=sorted(([-1 if k is None else k, v] for k, v in buckets.items()), key=lambda x: (x[0] < 0, x[0])),
                            last_change=max((f["last_change"] or 0) for f in folders) if folders else 0,
-                           last_list=me["last_list"] if me else 0, interval=interval(me["depth"], me["last_change"]) if me else None)
+                           last_list=me["last_list"] if me else 0,
+                           interval=(-1 if (iv := interval(me["depth"], me["last_change"], path)) is None else iv) if me else None,
+                           rule=key, rule_own=origin is not None and origin == rel(path),
+                           rule_from=origin if origin is not None and origin != rel(path) else "")
             rows.append(row)
         db.close()
         return {"success": True, "root": root, "path": base, "rows": rows, "files_here": files_here,
-                "polled": polled, "more": max(0, len(children) - 300)}
+                "polled": polled, "more": max(0, len(children) - 300),
+                "rule_options": [[k, v[0]] for k, v in worker.FOLDER_RULES.items()]}
+
+    def _rpc_set_folder_rule(self, ctx):
+        """폴더 비교: 이 폴더(와 하위 전체)를 다시 읽는 간격을 지정한다. 'auto'면 규칙을 지운다."""
+        worker = _load_worker_module()
+        root, path, key = str(ctx.get("root") or ""), str(ctx.get("path") or "").rstrip("/"), str(ctx.get("rule") or "auto")
+        if key not in worker.FOLDER_RULES and key != "inherit":
+            return {"success": False, "error": f"알 수 없는 간격: {key}"}
+        watch = _read_json("watch.json", {}) or {}
+        target = next((r for r in watch.get("roots") or [] if r.get("name") == root), None)
+        if not target:
+            return {"success": False, "error": "감시 폴더 설정을 찾을 수 없습니다. (바로가기 하위 감시는 규칙을 지정할 수 없습니다)"}
+        top = str(target.get("local_root") or "").rstrip("/")
+        if not worker.under(path, top):
+            return {"success": False, "error": "감시 폴더 밖의 경로입니다."}
+        rel = path[len(top):].strip("/")
+        rules = dict(target.get("folder_rules") or {})
+        rules.pop(rel, None)
+        inherited = worker.folder_rule(rules, rel)[0]  # 이 폴더 규칙을 뺐을 때 위에서 물려받는 규칙
+        if key == "inherit" or (key == "auto" and inherited == "auto"):
+            key = "inherit" if inherited != "auto" else "auto"
+        else:
+            rules[rel] = key  # 위 규칙과 다르게 '자동'을 고르면 자동을 명시적으로 저장
+        target["folder_rules"] = rules
+        _write_json("watch.json", watch)
+        self._sync_runtime()
+        if key != "off":  # 간격이 바뀐 폴더는 다음 비교 때 한 번 읽고 새 간격으로 이어 간다
+            db = _db()
+            with db:
+                db.execute("UPDATE pollfolder SET last_list=0 WHERE root=? AND (path=? OR (path >= ? AND path < ?))",
+                           (root, path, path + "/", path + "0"))
+            db.close()
+        name = rel or "(감시 폴더 전체)"
+        if key == "inherit":
+            return {"success": True, "message": f"[{name}] 따로 정한 규칙을 지우고 상위 폴더 규칙({worker.FOLDER_RULES[inherited][0]})을 따릅니다."}
+        label = worker.FOLDER_RULES[key][0]
+        if key == "auto" and inherited != "auto":
+            return {"success": True, "message": f"[{name}] 폴더와 하위는 상위 규칙 대신 자동(최근 변경 기준)으로 다시 읽습니다."}
+        if key == "auto":
+            return {"success": True, "message": f"[{name}] 규칙을 지우고 자동(최근 변경 기준)으로 되돌렸습니다."}
+        if key == "off":
+            return {"success": True, "message": f"[{name}] 폴더와 하위는 더 이상 다시 읽지 않습니다. 이 아래의 변경은 감지되지 않습니다."}
+        when = "매 주기" if key == "every" else f"{label}마다"
+        return {"success": True, "message": f"[{name}] 폴더와 하위를 {when} 다시 읽습니다 (더 깊은 폴더에 따로 정한 규칙이 우선)."}
 
     def _rpc_force_folder(self, ctx):
         """폴더 비교: 이 폴더(와 하위)를 다음 비교 때 바로 다시 읽게 한다."""
@@ -712,7 +858,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         db = _db()
         with db:
             n = db.execute("UPDATE pollfolder SET last_list=0 WHERE root=? AND (path=? OR (path >= ? AND path < ?))",
-                           (root, path, path + "/", path + "/\uffff")).rowcount
+                           (root, path, path + "/", path + "0")).rowcount
         db.close()
         open(_path("wake.flag"), "w").close()
         if not n:
@@ -838,7 +984,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         # 환경설정 화면의 플러그인 설정과도 맞춰 둔다 (지원되는 경우)
         try:
             gateway = self.get_db_gateway("general")
-            current = dict(gateway.get_plugin_config(self.id) or {})
+            current = self._plugin_cfg()
             current.update({k: v for k, v in clean.items() if k != "WEBHOOK_TOKEN" or v})
             gateway.set_plugin_config(self.id, current)
         except Exception:
@@ -848,6 +994,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
 
     def _rpc_save_watch(self, ctx):
         watch = ctx.get("watch") or {}
+        old_rules = {r.get("name"): r.get("folder_rules") or {} for r in (self._watch().get("roots") or [])}
         names = set()
         roots = []
         for index, root in enumerate(watch.get("roots") or [], 1):
@@ -871,14 +1018,16 @@ class GDriveWatchProvider(BaseMetadataProvider):
                           "source_remote": str(root["source_remote"]).strip().rstrip(":"),
                           "root_id": str(root["root_id"]).strip(), "local_root": local_root,
                           "seed": bool(root.get("seed", True)), "enabled": bool(root.get("enabled", True)),
-                          "activity_delay": int(root.get("activity_delay") or 60)})
+                          "activity_delay": int(root.get("activity_delay") or 60),
+                          # 폴더별 주기 규칙은 세부 보기에서 따로 저장하므로 화면이 안 보내면 기존 값을 유지
+                          "folder_rules": root.get("folder_rules") if isinstance(root.get("folder_rules"), dict)
+                          else old_rules.get(name, {})})
         for i, left in enumerate(roots):
             for right in roots[i + 1:]:
                 l, r = left["local_root"], right["local_root"]
                 if (left["mode"] == "local" or right["mode"] == "local") and (l == r or l.startswith(r + "/") or r.startswith(l + "/")):
                     return {"success": False, "error": f"[{left['name']}]와 [{right['name']}]의 로컬 경로가 겹칩니다. "
                                                        "같은 폴더를 두 방식으로 감시하면 스캔이 중복됩니다."}
-        import re
         raw = watch.get("ignore_patterns")
         patterns = [l.strip() for l in (raw.splitlines() if isinstance(raw, str) else raw or []) if l.strip()]
         for line in patterns:
@@ -917,6 +1066,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "poll_warm_hours": max(1, int(watch.get("poll_warm_hours", 24) or 24)),
             "poll_cool_days": max(1, int(watch.get("poll_cool_days", 7) or 7)),
             "poll_cold_days": max(1, int(watch.get("poll_cold_days", 14) or 14)),
+            "poll_skeleton_depth": min(5, max(0, int(watch.get("poll_skeleton_depth", 2) if watch.get("poll_skeleton_depth") not in (None, "") else 2))),
+            "poll_skeleton_idle_days": max(0, int(watch.get("poll_skeleton_idle_days", 7) if watch.get("poll_skeleton_idle_days") not in (None, "") else 7)),
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),
@@ -1338,7 +1489,6 @@ class GDriveWatchProvider(BaseMetadataProvider):
         rclone이 새 토큰을 받아 오면 실제 파일에서는 그 리모트의 'token =' 한 줄만 교체한다.
         (rclone config update는 백엔드 설정 과정을 다시 거치면서 scope·team_drive 같은 값을 바꿀 수 있어 쓰지 않음)
         갱신에 실패하면 실제 파일은 그대로다."""
-        import re
         import shutil
         import tempfile
         remote = str(ctx.get("remote") or "").strip().rstrip(":")
@@ -1413,19 +1563,49 @@ class GDriveWatchProvider(BaseMetadataProvider):
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
-        # 실제 파일: 그 사이 바뀌었을 수 있으니 다시 읽고, 해당 리모트의 token 한 줄만 교체해 제자리에 쓴다
-        with open(conf_path, encoding="utf-8") as handle:
-            latest = handle.read()
-        lines, index, prefix, _ = find_token(latest)
-        if index < 0:
-            return {"success": False, "error": "갱신 중 rclone.conf가 바뀌어 반영하지 못했습니다. 다시 시도하세요."}
-        lines[index] = prefix + t_value + eol(lines[index])
-        with open(conf_path, "r+", encoding="utf-8") as handle:  # 제자리 쓰기: 파일 단위 마운트에서도 동작
-            handle.write("".join(lines))
-            handle.truncate()
+        # 실제 파일: 그 사이 바뀌었을 수 있으니 잠근 뒤 다시 읽고, 해당 리모트의 token 한 줄만 교체한다
+        error = self._write_conf_token(conf_path, find_token, eol, t_value)
+        if error:
+            return {"success": False, "error": error}
         return {"success": True, "expiry": after,
                 "message": f"{remote} 토큰을 갱신했습니다. 새 만료 {after[:19].replace('T', ' ')} (이전 {before[:19].replace('T', ' ')}). "
                            "다른 설정(scope 등)은 그대로입니다."}
+
+    @staticmethod
+    def _write_conf_token(conf_path, find_token, eol, value):
+        """rclone.conf의 token 한 줄만 안전하게 바꾼다.
+        - 바꾸기 전 원본을 플러그인 데이터 폴더에 rclone.conf.bak으로 남긴다
+        - 쓰는 동안 flock (같은 파일을 쓰는 다른 gdrive_watch 호출과 겹치지 않게)
+        - 내용은 한 번에 쓰고 fsync (실패하면 .bak으로 되돌릴 수 있음)"""
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_path("rclone.conf.lock"), "a+") as lock:
+            try:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            except ImportError:
+                pass
+            with open(conf_path, encoding="utf-8") as handle:
+                latest = handle.read()
+            lines, index, prefix, _ = find_token(latest)
+            if index < 0:
+                return "갱신 중 rclone.conf가 바뀌어 반영하지 못했습니다. 다시 시도하세요."
+            backup = _path("rclone.conf.bak")
+            with open(backup, "w", encoding="utf-8") as handle:
+                handle.write(latest)
+            try:
+                os.chmod(backup, 0o600)
+            except OSError:
+                pass
+            lines[index] = prefix + value + eol(lines[index])
+            text = "".join(lines)
+            # 제자리 쓰기(같은 inode 유지): FF·호스트 등 다른 컨테이너가 이 파일을 '파일 단위'로 마운트해도
+            # 바뀐 내용을 그대로 본다. (rename으로 교체하면 그런 곳은 옛 파일을 계속 본다)
+            with open(conf_path, "r+", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+        return ""
 
     @staticmethod
     def _granted_scopes(token):
@@ -1484,6 +1664,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
         url = str(ctx.get("url") or self._watch().get("discord_webhook") or "").strip()
         if not url:
             return {"success": False, "error": "웹훅 주소를 입력하세요."}
+        if not url.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
+            return {"success": False, "error": "디스코드 웹훅 주소는 https://discord.com/api/webhooks/… 형식이어야 합니다."}
         notifier = worker.Notifier({"discord_webhook": url})
         status = notifier.post([{"title": "드라이브 변경 감시 · 알림 시험", "color": 3447003,
                                  "description": "이 채널로 처리 결과(반영됨·실패)와 감시 오류를 알립니다."}])
@@ -1549,8 +1731,17 @@ class GDriveWatchProvider(BaseMetadataProvider):
         except (TypeError, ValueError):
             return {"success": False, "error": "유효하지 않은 보관함 ID입니다."}
         cron = str(ctx.get("cron_schedule") or "").strip()
-        if len(cron.split()) < 5:
-            return {"success": False, "error": f"유효하지 않은 cron 표현식입니다: {cron}"}
+        problem = _load_worker_module().validate_cron(cron)
+        if not problem:
+            try:  # BookOasis 스케줄러(APScheduler)가 있으면 그 파서로도 확인
+                from apscheduler.triggers.cron import CronTrigger
+                CronTrigger.from_crontab(cron)
+            except ImportError:
+                pass
+            except Exception as error:
+                problem = f"스케줄러가 읽을 수 없는 형식: {error}"
+        if problem:
+            return {"success": False, "error": f"유효하지 않은 cron 표현식입니다 ({cron}): {problem}"}
         try:
             self.get_db_gateway(scope).execute("UPDATE libraries SET cron_schedule = %s WHERE id = %s", (cron, library_id))
         except Exception as error:
