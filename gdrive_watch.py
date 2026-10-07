@@ -250,6 +250,7 @@ DEFAULT_WATCH = {
     "buffer_seconds": 60,
     "max_attempts": 5,
     "keep_days": 30,
+    "log_keep_days": 3,
     "extensions": "",
     "verbose_log": False,
     "file_wait_minutes": 10,
@@ -882,6 +883,24 @@ class GDriveWatchProvider(BaseMetadataProvider):
                 continue
         return {"success": True, "text": text or "(로그 없음)"}
 
+    def _rpc_clear_log(self, ctx):
+        """로그 비우기: 지금 로그는 내용을 비우고(워커가 계속 이어 씀), 지난 날짜 로그는 지운다."""
+        removed = 0
+        for name in os.listdir(DATA_DIR) if os.path.isdir(DATA_DIR) else []:
+            if name.startswith(("worker.log.", "worker.out.")):
+                try:
+                    os.remove(_path(name))
+                    removed += 1
+                except OSError:
+                    pass
+        for name in ("worker.log", "worker.out"):
+            try:
+                with open(_path(name), "r+b") as handle:
+                    handle.truncate(0)
+            except OSError:
+                pass
+        return {"success": True, "message": "로그를 비웠습니다." + (f" (지난 로그 파일 {removed}개 삭제)" if removed else "")}
+
     def _drop_legacy_rules(self):
         """v1.1.x의 'RC로 규칙 추가'가 만든 규칙(보관함 루트=마운트 루트로 가정, 하위 경로 없음)은
         실제 마운트 구조와 달라 잘못된 경로로 refresh하므로 제거한다. 이제 같은 일을 자동 감지가 한다."""
@@ -1045,6 +1064,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "buffer_seconds": max(0, int(watch.get("buffer_seconds") or 0)),
             "max_attempts": max(1, int(watch.get("max_attempts") or 5)),
             "keep_days": max(1, int(watch.get("keep_days") or 30)),
+            "log_keep_days": min(90, max(1, int(watch.get("log_keep_days") or 3))),
             "extensions": str(watch.get("extensions") or "").strip(),
             "verbose_log": bool(watch.get("verbose_log")),
             "file_wait_minutes": max(0, int(watch.get("file_wait_minutes", 10) or 0)),

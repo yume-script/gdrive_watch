@@ -659,6 +659,7 @@
                 }).catch(function (err) { out.textContent = err.message; out.hidden = false; });
             }
             else if (a === 'log') loadLog();
+            else if (a === 'clear_log') { if (confirm('로그를 모두 비울까요? (변경 기록은 그대로입니다)')) act('clear_log', {}, false).then(loadLog); }
             else if (a === 'toggle_roots') setRootsCollapsed(!bind('roots-panel').classList.contains('is-collapsed'), true);
             else if (a === 'check_rclone') checkRclone(false);
             else if (a === 'manual_create' || a === 'manual_delete') {

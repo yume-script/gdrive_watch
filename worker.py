@@ -35,7 +35,8 @@ from urllib.request import Request, urlopen
 
 log = logging.getLogger("gdrive_watch")
 STOP = False
-SEEDERS = {}  # 감시 폴더 이름 → 기존 파일 목록 수집 스레드/프로세스
+SEEDERS = {}
+CHANGES_PAGES = {}  # 한 번의 확인 안에서 (리모트, 드라이브, 페이지 토큰) → 변경 목록 페이지 (같은 드라이브 감시끼리 공유)  # 감시 폴더 이름 → 기존 파일 목록 수집 스레드/프로세스
 IGNORE = []   # 무시할 경로 정규식 (설정에서 적용)
 FILE_WAIT_INTERVAL = 20  # 파일이 마운트에 보일 때까지 다시 확인하는 간격(초)
 DEFAULT_IGNORE_PATTERNS = [
@@ -921,6 +922,8 @@ class Watcher:
             return f"{self.name}: {st['note']}"
         if not st["raw"]:
             return f"{self.name}: 변경 없음"
+        if not st["events"] and st["outside"] == st["raw"]:
+            return f"{self.name}: 변경 없음 (같은 드라이브의 다른 폴더 변경 {st['outside']}건 건너뜀)"
         parts = [f"기록 {st['events']}"]
         for key, label in (("outside", "범위 밖"), ("ext", "확장자 제외"), ("same", "변화 없음")):
             if st[key]:
@@ -1204,11 +1207,18 @@ class ChangesWatcher(Watcher):
         started = time.monotonic()
         self.behind = False
         while token and not STOP:
+            key = (self.source_remote, self.drive_id, token)
             try:
-                data = self.api.get(
-                    "changes", pageToken=token, pageSize=1000, includeRemoved="true",
-                    includeItemsFromAllDrives="true", **drive_params,
-                    fields=f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))")
+                data = CHANGES_PAGES.get(key)
+                if data is None:
+                    data = self.api.get(
+                        "changes", pageToken=token, pageSize=1000, includeRemoved="true",
+                        includeItemsFromAllDrives="true", **drive_params,
+                        fields=f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))")
+                    # 같은 드라이브를 감시하는 다른 폴더도 이번 확인에서 이 페이지를 그대로 쓴다 (Drive 호출 1번으로)
+                    CHANGES_PAGES[key] = data
+                else:
+                    self.stat["shared"] = self.stat.get("shared", 0) + 1
             except DriveError as error:
                 if error.code != 400:
                     raise
@@ -1266,8 +1276,9 @@ class ChangesWatcher(Watcher):
             if old:
                 prev = {"path": old, "is_dir": data.get("mimeType") == FOLDER_MIME, "sig": ""}
         if prev is None and cur is None:
+            # 같은 드라이브의 다른 폴더 변경: 드라이브 변경 목록은 드라이브 전체 단위라 정상적으로 섞여 온다.
+            # 하나하나 로그에 남기지 않고 요약의 '범위 밖' 개수로만 센다.
             self.stat["outside"] += 1
-            self.trace("범위 밖: %s (%s)", data.get("name") or "(삭제된 항목)", file_id)
             return 0
         return self.emit(file_id, prev, cur)
 
@@ -2747,6 +2758,10 @@ class Worker:
         with open(self.runtime_path, encoding="utf-8") as handle:
             cfg = json.load(handle)
         old_cfg, self.cfg = self.cfg, cfg
+        try:
+            apply_log_retention(self.data_dir, cfg.get("log_keep_days", 3))
+        except Exception as error:
+            log.warning("로그 정리 실패: %s", error)
         if not first and self.rclone and all(self._watch_view(old_cfg, k) == self._watch_view(cfg, k) for k in self.WATCH_KEYS):
             rules = {r.get("name"): r.get("folder_rules") or {} for r in cfg.get("roots") or []}
             for watcher in self.watchers:
@@ -2894,6 +2909,7 @@ class Worker:
 
     def collect(self):
         started = time.monotonic()
+        CHANGES_PAGES.clear()
         lines = []
         for watcher in list(self.watchers):
             if isinstance(watcher, (ChangesWatcher, ActivityWatcher)) and watcher.root_checked \
@@ -3072,6 +3088,10 @@ class Worker:
             self.process()
             if now >= next_cleanup:
                 self.store.cleanup(int(self.cfg.get("keep_days", 30)))
+                try:
+                    apply_log_retention(self.data_dir, self.cfg.get("log_keep_days", 3))
+                except Exception:
+                    pass
                 next_cleanup = now + 86400
             self.activity("대기 중")
             for _ in range(4):
@@ -3092,6 +3112,29 @@ class Worker:
         except OSError:
             pass
         log.info("워커 종료")
+
+
+def apply_log_retention(data_dir, days):
+    """worker.log 보관 기간 적용: 날짜별로 나뉜 지난 로그는 days일치만 남기고 지운다 (이전 버전의 크기별 로그 포함)."""
+    days = max(1, int(days or 3))
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.handlers.TimedRotatingFileHandler):
+            handler.backupCount = days
+    cutoff = time.time() - days * 86400
+    for name in os.listdir(data_dir):
+        if name.startswith(("worker.log.", "worker.out.")) or name in ("worker.log.1", "worker.log.2"):
+            full = os.path.join(data_dir, name)
+            try:
+                if os.path.getmtime(full) < cutoff or name in ("worker.log.1", "worker.log.2"):
+                    os.remove(full)
+            except OSError:
+                pass
+    out = os.path.join(data_dir, "worker.out")  # 표준 출력(예외 흔적)은 커지면 비운다
+    try:
+        if os.path.getsize(out) > 5 * 1024 * 1024:
+            open(out, "w").close()
+    except OSError:
+        pass
 
 
 def acquire_lock(path):
@@ -3126,8 +3169,9 @@ def main():
     lock = acquire_lock(os.path.join(data_dir, "worker.lock"))
     if lock is None:
         return 0  # 이미 실행 중
-    handler = logging.handlers.RotatingFileHandler(os.path.join(data_dir, "worker.log"),
-                                                   maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8")
+    # 하루 단위로 나눠 저장하고, 처리 옵션의 '로그 보관(일)'만큼만 남긴다 (Worker.load에서 적용)
+    handler = logging.handlers.TimedRotatingFileHandler(os.path.join(data_dir, "worker.log"), when="midnight",
+                                                        backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
     logging.basicConfig(level=logging.INFO, handlers=[handler])
 
