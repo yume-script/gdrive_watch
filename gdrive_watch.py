@@ -261,6 +261,8 @@ DEFAULT_WATCH = {
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "notify_done": True,
+    "notify_interval_minutes": 10,
+    "notify_batch_count": 100,
     "notify_failed": True,
     "notify_error": True,
 }
@@ -1075,6 +1077,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "notify_done": bool(watch.get("notify_done", True)),
+            "notify_interval_minutes": min(1440, max(0, int(watch.get("notify_interval_minutes", 10) if watch.get("notify_interval_minutes") not in (None, "") else 10))),
+            "notify_batch_count": min(10000, max(0, int(watch.get("notify_batch_count", 100) if watch.get("notify_batch_count") not in (None, "") else 100))),
             "notify_failed": bool(watch.get("notify_failed", True)),
             "notify_error": bool(watch.get("notify_error", True)),
         }

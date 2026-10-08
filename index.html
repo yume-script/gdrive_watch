@@ -206,9 +206,11 @@
       <details class="gdw-details">
         <summary>디스코드 알림 <small>(처리 결과·감시 오류)</small></summary>
         <div class="gdw-details-body">
-          <p class="gdw-tip">처리 묶음마다 결과를 한 번에 보냅니다. 감지 시점이 아니라 스캔까지 끝난 뒤의 결과입니다.</p>
+          <p class="gdw-tip">스캔까지 끝난 결과(반영됨·실패)를 모아 두었다가, <b>주기(분)가 지나거나 모인 건수가 기준에 닿으면</b> 둘 중 먼저 오는 때에 한 번에 보냅니다. 둘 다 0이면 처리 묶음마다 바로 보냅니다. 감시 오류·복구는 바로 보냅니다.</p>
           <div class="gdw-opts gdw-env">
             <label class="gdw-wide">웹훅 주소<input type="text" data-opt="discord_webhook" placeholder="https://discord.com/api/webhooks/… 또는 https://script.google.com/macros/s/…/exec?…"></label>
+            <label title="가장 먼저 모인 결과가 이 시간만큼 기다리면 보냅니다. 0이면 시간 조건 없음">보내는 주기(분)<input type="number" min="0" max="1440" data-opt="notify_interval_minutes"></label>
+            <label title="모인 결과(반영됨+실패)가 이 건수 이상이면 주기를 기다리지 않고 보냅니다. 0이면 건수 조건 없음">모인 건수(건)<input type="number" min="0" max="10000" data-opt="notify_batch_count"></label>
             <label class="gdw-check"><input type="checkbox" data-opt="notify_done"> 반영됨</label>
             <label class="gdw-check"><input type="checkbox" data-opt="notify_failed"> 실패</label>
             <label class="gdw-check"><input type="checkbox" data-opt="notify_error"> 감시 오류·복구</label>

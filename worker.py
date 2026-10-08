@@ -2637,19 +2637,47 @@ class BookOasis:
 # ─────────────────────────── 디스코드 알림 ───────────────────────────
 
 class Notifier:
-    """처리 결과를 디스코드 웹훅으로 알린다. 감지 시점이 아니라 '반영됨/실패'가 정해진 뒤, 처리 묶음마다 한 번."""
+    """처리 결과를 디스코드 웹훅으로 알린다. 감지 시점이 아니라 '반영됨/실패'가 정해진 뒤.
+    결과는 모아 두었다가 [주기(분)가 지났거나 / 모인 건수가 기준 이상]이면 한 번에 보낸다. 둘 다 0이면 처리 묶음마다 바로."""
     ICON = {"create": "➕", "edit": "✏️", "rename": "↪️", "move": "↪️", "delete": "🗑️"}
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, data_dir=None):
         self.url = str(cfg.get("discord_webhook") or "").strip()
         self.on_done = bool(cfg.get("notify_done", True))
         self.on_failed = bool(cfg.get("notify_failed", True))
         self.on_error = bool(cfg.get("notify_error", True))
+        self.interval = max(0, int(cfg.get("notify_interval_minutes", 10) or 0)) * 60
+        self.batch = max(0, int(cfg.get("notify_batch_count", 100) or 0))
         self.sent_errors = {}
+        self.retry_at = 0.0
+        # 모아 둔 결과는 파일에 남겨 워커 재시작·설정 변경 뒤에도 이어서 보낸다
+        self.queue_path = os.path.join(data_dir, "notify_queue.json") if data_dir else None
+        self.queue = self._load_queue()
 
     @property
     def enabled(self):
         return self.url.startswith("https://")
+
+    def _load_queue(self):
+        if not self.queue_path:
+            return []
+        try:
+            with open(self.queue_path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save_queue(self):
+        if not self.queue_path:
+            return
+        try:
+            tmp = self.queue_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self.queue[-5000:], handle, ensure_ascii=False)
+            os.replace(tmp, self.queue_path)
+        except OSError as error:
+            log.warning("알림 대기열 저장 실패: %s", error)
 
     def post(self, embeds):
         if not self.enabled or not embeds:
@@ -2675,25 +2703,64 @@ class Notifier:
         return f"{icon} **{name}**{'/' if ev['item_type'] == 'directory' else ''} · {parent}{extra}"[:300]
 
     def results(self, events, results):
+        """처리 결과를 대기열에 넣고, 보낼 조건이 되면 보낸다."""
         if not self.enabled:
             return
-        done = [ev for ev in events if results[ev["id"]]["status"] == "done"]
-        failed = [ev for ev in events if results[ev["id"]]["status"] in ("failed", "timeout")]
+        now = time.time()
+        for ev in events:
+            r = results[ev["id"]]
+            if r["status"] == "done" and self.on_done:
+                libs = [s["library"] for s in r["scans"] if s.get("ok") and s.get("library")]
+                self.queue.append({"kind": "done", "line": self._line(ev), "libs": libs, "ts": now})
+            elif r["status"] in ("failed", "timeout") and self.on_failed:
+                self.queue.append({"kind": "failed", "line": self._line(ev, f"\n　└ {r['message'][:160]}"), "ts": now})
+        self._save_queue()
+        self.flush()
+
+    def due(self, now=None):
+        """보낼 차례인지: 쌓인 건수가 기준 이상이거나, 가장 오래된 결과가 주기(분)만큼 기다렸으면."""
+        if not self.queue:
+            return False
+        if not self.interval and not self.batch:
+            return True
+        now = now or time.time()
+        if self.batch and len(self.queue) >= self.batch:
+            return True
+        return bool(self.interval) and now - min(q["ts"] for q in self.queue) >= self.interval
+
+    def flush(self, force=False):
+        if not self.queue or not self.enabled:
+            return
+        if not force and (time.time() < self.retry_at or not self.due()):
+            return
+        items, self.queue = self.queue, []
+        done = [q for q in items if q["kind"] == "done"]
+        failed = [q for q in items if q["kind"] == "failed"]
         embeds = []
-        if self.on_done and done:
-            libs = sorted({s["library"] for ev in done for s in results[ev["id"]]["scans"] if s.get("ok") and s.get("library")})
-            lines = [self._line(ev) for ev in done[:15]] + ([f"… 외 {len(done) - 15}건"] if len(done) > 15 else [])
-            embeds.append({"title": f"반영됨 {len(done)}건", "color": 5763719, "description": "\n".join(lines)[:3900],
-                           "footer": {"text": ", ".join(libs)[:200]} if libs else None})
-        if self.on_failed and failed:
-            lines = [self._line(ev, f"\n　└ {results[ev['id']]['message'][:160]}") for ev in failed[:10]]
-            lines += [f"… 외 {len(failed) - 10}건"] if len(failed) > 10 else []
+        if done:
+            counts = {}
+            for q in done:
+                for lib in set(q.get("libs") or []):
+                    counts[lib] = counts.get(lib, 0) + 1
+            lines = [q["line"] for q in done[:15]] + ([f"… 외 {len(done) - 15}건"] if len(done) > 15 else [])
+            embed = {"title": f"반영됨 {len(done)}건", "color": 5763719, "description": "\n".join(lines)[:3900]}
+            if counts:
+                text = " · ".join(f"{lib} {n}" for lib, n in sorted(counts.items(), key=lambda x: -x[1]))
+                embed["footer"] = {"text": text[:2000]}
+            embeds.append(embed)
+        if failed:
+            lines = [q["line"] for q in failed[:10]] + ([f"… 외 {len(failed) - 10}건"] if len(failed) > 10 else [])
             embeds.append({"title": f"실패 {len(failed)}건 (재시도 예정이거나 확인 필요)", "color": 15548997,
                            "description": "\n".join(lines)[:3900]})
-        for embed in embeds:
-            if embed.get("footer") is None:
-                embed.pop("footer", None)
-        self.post(embeds)
+        if len(items) > 1:
+            span = int(time.time() - min(q["ts"] for q in items)) // 60
+            for embed in embeds:
+                embed["title"] += f" · 최근 {span}분" if span else ""
+        status = self.post(embeds)
+        if status == 0 or status == 429 or (status or 0) >= 500:
+            self.queue = items + self.queue  # 보내지 못했으면(연결 오류·서버 오류·호출 제한) 1분 뒤 다시
+            self.retry_at = time.time() + 60
+        self._save_queue()
 
     def root_error(self, name, message):
         """감시 폴더 오류는 같은 내용이면 한 번만 알린다."""
@@ -2719,7 +2786,7 @@ class Worker:
         self.store = Store(os.path.join(data_dir, "state.db"))
         self.runtime_mtime = 0
         self.watchers, self.target, self.rclone, self.locals = [], None, None, []
-        self.notifier = Notifier({})
+        self.notifier = Notifier({}, data_dir)
         self.cfg = {}
         self.state = {"pid": os.getpid(), "started": datetime.now().isoformat(timespec="seconds"),
                       "activity": "시작 중", "last_poll": "", "last_process": "", "error": ""}
@@ -2767,7 +2834,7 @@ class Worker:
             for watcher in self.watchers:
                 if watcher.name in rules:
                     watcher.cfg["folder_rules"] = rules[watcher.name]
-            self.notifier = Notifier(cfg)
+            self.notifier = Notifier(cfg, self.data_dir)
             self.rclone.rc_sources = rc_sources(cfg.get("vfs"), cfg.get("libraries"))
             skip_vfs = self.target.skip_vfs if self.target else set()
             self.target = BookOasis(cfg, cfg.get("libraries"), cfg.get("vfs"), self.store)
@@ -2793,7 +2860,7 @@ class Worker:
         except re.error as error:
             log.error("무시 패턴 오류, 기본값 사용: %s", error)
             IGNORE = compile_patterns(DEFAULT_IGNORE_PATTERNS)
-        self.notifier = Notifier(cfg)
+        self.notifier = Notifier(cfg, self.data_dir)
         buffer_seconds = int(cfg.get("buffer_seconds", 60))
         for old in getattr(self, "locals", []):
             old.stop()
@@ -3086,6 +3153,10 @@ class Worker:
                 next_poll = time.monotonic() + interval
                 self.state["next_poll"] = (datetime.now() + timedelta(seconds=interval)).isoformat(timespec="seconds")
             self.process()
+            try:
+                self.notifier.flush()  # 모아 둔 처리 결과: 주기·건수 조건이 되면 디스코드로
+            except Exception as error:
+                log.warning("알림 처리 오류: %s", error)
             if now >= next_cleanup:
                 self.store.cleanup(int(self.cfg.get("keep_days", 30)))
                 try:
