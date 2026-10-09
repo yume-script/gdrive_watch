@@ -81,7 +81,7 @@
         var ld = w.load, loadBox = bind('load');
         if (loadBox) {
             loadBox.hidden = !ld;
-            if (ld) loadBox.textContent = '최근 1시간 · Drive 호출 ' + (ld.drive || 0).toLocaleString() + ' · VFS 새로고침 ' + (ld.vfs || 0).toLocaleString()
+            if (ld) loadBox.textContent = '최근 1시간 · Drive 호출 ' + (ld.drive || 0).toLocaleString() + ' · VFS 새로고침 ' + (ld.vfs || 0).toLocaleString() + (ld.vfs_skip ? ' (이미 보여 생략 ' + ld.vfs_skip.toLocaleString() + ')' : '')
                 + ' · 스캔 요청 ' + (ld.scan || 0).toLocaleString() + (ld.rootscan ? ' (전체 스캔 대신 미룸 ' + ld.rootscan + ')' : '')
                 + ' · 워커 CPU ' + (ld.cpu || 0) + '% · 메모리 ' + (ld.mem_mb || 0) + 'MB';
             var dd = d.dedupe || {};

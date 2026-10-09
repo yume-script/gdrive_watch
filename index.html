@@ -183,7 +183,8 @@
       </div>
       <div class="gdw-opts">
         <label>확인 주기(초)<input type="number" min="15" data-opt="poll_seconds"></label>
-        <label>모아서 처리(초)<input type="number" min="0" data-opt="buffer_seconds"></label>
+        <label title="같은 폴더에 새 변경이 이 시간 동안 더 없으면 그 폴더를 한 번에 처리합니다 (회차가 연달아 올라오는 동안은 기다림). 0이면 바로 처리">폴더가 조용해질 때까지(초)<input type="number" min="0" data-opt="buffer_seconds"></label>
+        <label title="폴더에 변경이 계속 이어져도 첫 변경 뒤 이 시간이 지나면 더 기다리지 않고 처리합니다">최대 대기(분)<input type="number" min="1" max="120" data-opt="buffer_max_minutes"></label>
         <label>최대 재시도<input type="number" min="1" data-opt="max_attempts"></label>
         <label title="변경 기록 탭의 반영됨·건너뜀·시간 초과 기록을 이 기간만큼 남깁니다 (실패 기록은 2배)">기록 보관(일)<input type="number" min="1" data-opt="keep_days"></label>
         <label title="로그 탭의 worker.log를 하루 단위로 나눠 이 기간만큼만 남기고 지난 것은 지웁니다 (1~90)">로그 보관(일)<input type="number" min="1" max="90" data-opt="log_keep_days"></label>

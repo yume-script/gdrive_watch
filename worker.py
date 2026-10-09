@@ -37,7 +37,7 @@ log = logging.getLogger("gdrive_watch")
 STOP = False
 SEEDERS = {}
 CHANGES_PAGES = {}
-LOAD = {"drive": [], "vfs": [], "scan": [], "rootscan": []}  # 최근 1시간 호출 시각 (부하 점검용)
+LOAD = {"drive": [], "vfs": [], "vfs_skip": [], "scan": [], "rootscan": []}  # 최근 1시간 호출 시각 (부하 점검용)
 
 
 def count_load(kind):
@@ -531,7 +531,43 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO vfs_map VALUES(?,?,?,?,?)",
                             (root, rc, fs, remote, datetime.now().isoformat(timespec="seconds")))
 
-    def claim(self, limit=500):
+    def claim(self, limit=500, quiet=0, max_wait=600):
+        """처리할 기록. quiet초: 같은 폴더에 새 변경이 이 시간 안에 또 들어왔으면 이번에는 보류하고
+        (회차가 연달아 올라오는 동안 폴더마다 VFS 새로고침·스캔을 여러 번 하지 않도록) 조용해지면 한 번에 처리.
+        단, 첫 변경 뒤 max_wait초가 지나면 더 기다리지 않는다."""
+        rows = self._claim(limit)
+        if not rows or quiet <= 0:
+            return rows
+        now = time.time()
+
+        def folder(ev):
+            path = ev["path"] or ev["removed_path"] or ""
+            return path if ev["item_type"] == "directory" else posixpath.dirname(path)
+
+        def stamp_of(text):
+            try:
+                return datetime.fromisoformat(text).timestamp()
+            except (TypeError, ValueError):
+                return 0.0
+        latest = {}
+        for row in self.db.execute("SELECT path, removed_path, item_type, created FROM event "
+                                   "WHERE status='pending' AND created >= ?",
+                                   (datetime.fromtimestamp(now - max_wait - quiet).isoformat(timespec="seconds"),)):
+            key = folder(dict(row))
+            latest[key] = max(latest.get(key, 0.0), stamp_of(row["created"]))
+        kept, held = [], 0
+        for ev in rows:
+            if ev["status"] == "pending" and not ev.get("force"):
+                last = latest.get(folder(ev), 0.0)
+                if now - last < quiet and now - stamp_of(ev["created"]) < max_wait:
+                    held += 1
+                    continue
+            kept.append(ev)
+        if held:
+            log.debug("폴더에 변경이 이어지는 중이라 %d건 보류", held)
+        return kept
+
+    def _claim(self, limit=500):
         # 플러그인의 DB 중복 확인이 돌고 있으면, 확인을 마친 기록만 가져간다 (중복이면 VFS·스캔 없이 끝남)
         screened = screener_active(os.path.dirname(self.path))
         rows = self.db.execute(
@@ -2574,6 +2610,22 @@ class BookOasis:
         except (TypeError, ValueError):
             return []
 
+    @staticmethod
+    def _mount_shows(ev):
+        """마운트가 이미 바뀐 상태인지: 추가·수정은 새 경로가 보이고, 삭제는 사라지고, 이름 변경은 둘 다.
+        수정(edit)은 파일이 원래 보이므로 내용이 바뀌었는지 알 수 없어 새로고침한다."""
+        action, path, removed = ev["action"], ev["path"], ev["removed_path"]
+        try:
+            if action == "create":
+                return bool(path) and os.path.exists(path)
+            if action == "delete":
+                return bool(removed) and not os.path.exists(removed)
+            if action in ("rename", "move"):
+                return bool(path and removed) and os.path.exists(path) and not os.path.exists(removed)
+        except OSError:
+            return False
+        return False
+
     def _vfs_already_done(self, ev):
         """다시 처리하는 기록(파일 대기·전체 스캔 회피로 미룸)인데, 지난번 VFS 새로고침이 성공했고
         마운트에도 이미 원하는 상태(추가는 보임, 삭제는 사라짐)면 VFS를 다시 새로고침하지 않는다."""
@@ -2605,6 +2657,12 @@ class BookOasis:
                 continue
             if not any(p and self.library_for(p) for p in (ev["path"], ev["removed_path"])):
                 results[ev["id"]]["outside"] = True  # 어느 보관함에도 속하지 않는 경로: VFS 새로고침도 하지 않음
+                continue
+            if self._mount_shows(ev):
+                # rclone 마운트가 이미 바뀐 내용을 보여 주면(마운트 자체의 변경 감지·캐시 만료 등) 새로고침하지 않는다
+                results[ev["id"]]["vfs"].append({"op": "check", "path": ev["path"] or ev["removed_path"], "rc": "",
+                                                 "ok": True, "msg": "마운트에 이미 반영됨 (새로고침 생략)"})
+                count_load("vfs_skip")
                 continue
             is_dir = ev["item_type"] == "directory"
             path, removed = ev["path"], ev["removed_path"]
@@ -3220,7 +3278,8 @@ class Worker:
             log.info("확인 완료 (%.1f초) | %s", time.monotonic() - started, " | ".join(lines))
 
     def process(self):
-        events = self.store.claim()
+        events = self.store.claim(quiet=int(self.cfg.get("buffer_seconds", 60)),
+                                  max_wait=int(self.cfg.get("buffer_max_minutes", 10)) * 60)
         if not events or not self.target:
             return 0
         self.activity(f"이벤트 {len(events)}건 처리 중")

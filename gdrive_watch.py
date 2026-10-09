@@ -263,6 +263,7 @@ DEFAULT_WATCH = {
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "allow_root_scan": False,
+    "buffer_max_minutes": 10,
     "db_dedupe": True,
     "notify_done": True,
     "notify_interval_minutes": 10,
@@ -1082,6 +1083,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "allow_root_scan": bool(watch.get("allow_root_scan", False)),
+            "buffer_max_minutes": min(120, max(1, int(watch.get("buffer_max_minutes") or 10))),
             "db_dedupe": bool(watch.get("db_dedupe", True)),
             "notify_done": bool(watch.get("notify_done", True)),
             "notify_interval_minutes": min(1440, max(0, int(watch.get("notify_interval_minutes", 10) if watch.get("notify_interval_minutes") not in (None, "") else 10))),
