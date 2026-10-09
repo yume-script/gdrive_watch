@@ -23,6 +23,7 @@
     </h1>
     <p class="gdw-desc">Google Drive·로컬 폴더의 변경을 감지해 rclone VFS를 새로고침하고, 바뀐 폴더만 BookOasis에 부분 스캔을 요청합니다.</p>
     <p class="gdw-state"><span class="gdw-pulse" data-bind="pulse"></span><span data-bind="activity">상태를 불러오는 중…</span></p>
+    <p class="gdw-load" data-bind="load" hidden title="이 워커가 최근 1시간 동안 보낸 요청 수와 워커 프로세스 자원 사용량 (BookOasis 스캔 자체의 부하는 포함하지 않음)"></p>
     <div class="gdw-tally">
       <button type="button" class="gdw-flow-seg" data-filter="pending"><span>대기</span><strong data-count="pending">0</strong></button>
       <button type="button" class="gdw-flow-seg is-done" data-filter="done"><span>반영됨</span><strong data-count="done">0</strong></button>
@@ -192,6 +193,7 @@
         <label title="감시 폴더에서 이 단계까지의 폴더는 새 작품 폴더가 생기는 분류 폴더로 봅니다 (1일 안에 바뀌었으면 매 주기 확인). 0이면 감시 폴더 자체만">분류 폴더 단계(0~5)<input type="number" min="0" max="5" data-opt="poll_skeleton_depth"></label>
         <label title="Drive 폴더 비교 방식에서 폴더 묶음(50개)을 동시에 몇 개씩 조회할지. 늘리면 빨라지지만 Drive API 호출이 몰립니다 (1~16)">폴더 비교 동시 조회<input type="number" min="1" max="16" data-opt="drive_workers"></label>
         <label title="보관함 전체 스캔(cron)이 시작된 뒤 이 시간 동안은 그 보관함의 부분 스캔을 미룹니다. 2시간보다 자주 도는 일정은 회피하지 않습니다. 0이면 끔">전체 스캔 회피(분)<input type="number" min="0" data-opt="full_scan_guard_minutes"></label>
+        <label class="gdw-check" title="보관함 맨 위 폴더에서 바뀐 것(맨 위 작품 폴더 삭제 등)은 부분 스캔으로 처리하면 보관함 전체 스캔이 됩니다. 끄면 다음 예약 전체 스캔 때 반영합니다."><input type="checkbox" data-opt="allow_root_scan"> 보관함 맨 위 변경 때 전체 스캔 허용</label>
         <label class="gdw-check"><input type="checkbox" data-opt="verbose_log"> 자세한 로그 (변경 하나하나를 어떻게 처리했는지 로그에 남김)</label>
         <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>
       </div>

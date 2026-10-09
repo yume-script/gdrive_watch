@@ -78,6 +78,13 @@
         if (w.alive && w.next_poll) text += ' · 다음 확인 ' + String(w.next_poll).slice(11, 16);
         if (w.error) text += ' · ' + w.error;
         bind('activity').textContent = text;
+        var ld = w.load, loadBox = bind('load');
+        if (loadBox) {
+            loadBox.hidden = !ld;
+            if (ld) loadBox.textContent = '최근 1시간 · Drive 호출 ' + (ld.drive || 0).toLocaleString() + ' · VFS 새로고침 ' + (ld.vfs || 0).toLocaleString()
+                + ' · 스캔 요청 ' + (ld.scan || 0).toLocaleString() + (ld.rootscan ? ' (전체 스캔 대신 미룸 ' + ld.rootscan + ')' : '')
+                + ' · 워커 CPU ' + (ld.cpu || 0) + '% · 메모리 ' + (ld.mem_mb || 0) + 'MB';
+        }
         bind('toggle').textContent = w.alive ? '중지' : '시작';
         var ver = bind('version');
         if (d.version) { ver.textContent = 'v' + d.version; ver.hidden = false; } else { ver.hidden = true; }

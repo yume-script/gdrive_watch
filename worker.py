@@ -36,7 +36,21 @@ from urllib.request import Request, urlopen
 log = logging.getLogger("gdrive_watch")
 STOP = False
 SEEDERS = {}
-CHANGES_PAGES = {}  # 한 번의 확인 안에서 (리모트, 드라이브, 페이지 토큰) → 변경 목록 페이지 (같은 드라이브 감시끼리 공유)  # 감시 폴더 이름 → 기존 파일 목록 수집 스레드/프로세스
+CHANGES_PAGES = {}
+LOAD = {"drive": [], "vfs": [], "scan": [], "rootscan": []}  # 최근 1시간 호출 시각 (부하 점검용)
+
+
+def count_load(kind):
+    now = time.time()
+    bucket = LOAD.setdefault(kind, [])
+    bucket.append(now)
+    if len(bucket) > 20000 or (bucket and bucket[0] < now - 3600):
+        LOAD[kind] = [t for t in bucket if t >= now - 3600]
+
+
+def load_summary():
+    now = time.time()
+    return {kind: sum(1 for t in times if t >= now - 3600) for kind, times in LOAD.items()}  # 한 번의 확인 안에서 (리모트, 드라이브, 페이지 토큰) → 변경 목록 페이지 (같은 드라이브 감시끼리 공유)  # 감시 폴더 이름 → 기존 파일 목록 수집 스레드/프로세스
 IGNORE = []   # 무시할 경로 정규식 (설정에서 적용)
 FILE_WAIT_INTERVAL = 20  # 파일이 마운트에 보일 때까지 다시 확인하는 간격(초)
 DEFAULT_IGNORE_PATTERNS = [
@@ -352,7 +366,35 @@ def open_db(path):
         db.execute("ALTER TABLE pollfolder ADD COLUMN folder_mtime REAL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    ensure_parent_index(db)
     return db
+
+
+def ensure_parent_index(db):
+    """v1.18.6: item에 '부모 폴더 경로'(마지막 '/'까지) 가상 열 + 인덱스.
+    폴더 비교에서 '이 폴더 바로 아래 항목'을 하위 전체를 훑지 않고 바로 찾는다. 지원 안 되는 SQLite면 False."""
+    has = any(row[1] == "parent_dir" for row in db.execute("PRAGMA table_xinfo(item)"))
+    if not has:
+        try:
+            db.execute("ALTER TABLE item ADD COLUMN parent_dir TEXT "
+                       "GENERATED ALWAYS AS (rtrim(path, replace(path, '/', ''))) VIRTUAL")
+            has = True
+        except sqlite3.OperationalError:
+            return False
+    try:
+        db.execute("CREATE INDEX IF NOT EXISTS ix_item_parent ON item(root, parent_dir)")
+        db.commit()
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def children_sql(db):
+    """폴더 바로 아래 항목 조건 (매개변수: prefix 하나). 가상 열이 있으면 인덱스로, 없으면 범위+검사로."""
+    if any(row[1] == "parent_dir" for row in db.execute("PRAGMA table_xinfo(item)")):
+        return "parent_dir = ?", lambda prefix: (prefix,)
+    return ("path >= ? AND path < ? AND instr(substr(path, ?), '/')=0",
+            lambda prefix: (prefix, prefix_upper(prefix), len(prefix) + 1))
 
 
 class Store:
@@ -814,6 +856,7 @@ class DriveApi:
         auth_retry, backoff = False, 0
         while True:
             self.limiter.wait()
+            count_load("drive")
             access = self.rclone.token(self.remote, force=auth_retry)["access"]
             request = Request(url, data=None if body is None else json.dumps(body).encode(),
                               headers={"Authorization": f"Bearer {access}", "Content-Type": "application/json"})
@@ -1717,11 +1760,11 @@ class DrivePollWatcher(Watcher):
                     return new_path + path[len(old_path):]
             return path
 
+        where, args = children_sql(store.db)
         for f in due:
             prefix = f["path"].rstrip("/") + "/"
             old = {r["file_id"]: (remap(r["path"]), bool(r["is_dir"]), r["sig"] or "") for r in store.db.execute(
-                "SELECT file_id, path, is_dir, sig FROM item WHERE root=? AND path >= ? AND path < ? "
-                "AND instr(substr(path, ?), '/')=0", (self.name, prefix, prefix_upper(prefix), len(prefix) + 1))}
+                f"SELECT file_id, path, is_dir, sig FROM item WHERE root=? AND {where}", (self.name,) + args(prefix))}
             cur = {c["id"]: dict(c, path=remap(c["path"])) for c in listed.get(f["folder_id"], [])}
             if f["folder_id"] in self.skipped:
                 touched[f["folder_id"]] = "skip"  # 조회 실패: 다음 비교 때 다시
@@ -2279,6 +2322,7 @@ class VfsRule:
         data = dict(params)
         if self.fs:
             data["fs"] = self.fs
+        count_load("vfs")
         request = Request(f"{self.rc}/{command}", data=urlencode(data).encode(),
                           headers={"Content-Type": "application/x-www-form-urlencoded"})
         if self.auth:
@@ -2406,6 +2450,7 @@ class BookOasis:
         self.token = cfg.get("webhook_token") or os.environ.get("WEBHOOK_TOKEN", "")
         self.timeout = int(cfg.get("scan_timeout", 300))
         self.file_wait = max(0, int(cfg.get("file_wait_minutes", 10)))  # 0이면 확인하지 않음
+        self.allow_root_scan = bool(cfg.get("allow_root_scan", False))  # 보관함 맨 위 변경 때 전체 스캔 허용
         self.guard = max(0, int(cfg.get("full_scan_guard_minutes", 10)))  # 전체 스캔 시간대 회피(분), 0이면 끔
         self.crons = {(lib["db_type"], int(lib["id"])): lib.get("cron_schedule") or ""
                       for lib in libraries or [] if lib.get("id") is not None}
@@ -2466,6 +2511,11 @@ class BookOasis:
             return False, "WEBHOOK_TOKEN이 없습니다. 플러그인 설정 또는 BookOasis .env를 확인하세요.", lib
         rel = directory[len(lib["root"]):].strip("/")
         while True:
+            if not rel and not self.allow_root_scan:
+                # 부분 스캔 대상이 보관함 맨 위가 되면 사실상 전체 스캔이라 보내지 않는다 (예약된 전체 스캔 때 반영)
+                count_load("rootscan")
+                return None, "보관함 맨 위 폴더라 부분 스캔 대신 다음 전체 스캔 때 반영", lib
+            count_load("scan")
             code, payload = self._post(lib, rel)
             message = str(payload.get("message") or payload.get("error") or f"HTTP {code}")
             if code == 200 and payload.get("success"):
@@ -2478,6 +2528,24 @@ class BookOasis:
                 rel = posixpath.dirname(rel)  # 삭제된 폴더면 상위로 (루트면 보관함 스캔)
                 continue
             return False, message, lib
+
+    @staticmethod
+    def _previous_vfs(ev):
+        try:
+            return (json.loads(ev.get("result") or "{}") or {}).get("vfs") or []
+        except (TypeError, ValueError):
+            return []
+
+    def _vfs_already_done(self, ev):
+        """다시 처리하는 기록(파일 대기·전체 스캔 회피로 미룸)인데, 지난번 VFS 새로고침이 성공했고
+        마운트에도 이미 원하는 상태(추가는 보임, 삭제는 사라짐)면 VFS를 다시 새로고침하지 않는다."""
+        if ev.get("status") != "waiting":
+            return False
+        vfs = self._previous_vfs(ev)
+        if not vfs or not all(v.get("ok") for v in vfs):
+            return False
+        target = ev["removed_path"] if ev["action"] == "delete" else ev["path"]
+        return bool(target) and os.path.exists(target) == (ev["action"] != "delete")
 
     def process(self, events):
         """events → {event_id: {"status", "message", "vfs": [...], "scans": [...]}}"""
@@ -2493,6 +2561,9 @@ class BookOasis:
         collapse = {d for d, ids in deleted_in.items() if len(ids) > 1}
         for ev in events:
             if ev.get("root") in getattr(self, "skip_vfs", ()):
+                continue
+            if self._vfs_already_done(ev):
+                results[ev["id"]]["vfs"] = self._previous_vfs(ev)
                 continue
             is_dir = ev["item_type"] == "directory"
             path, removed = ev["path"], ev["removed_path"]
@@ -2555,6 +2626,8 @@ class BookOasis:
                     r["messages"].append(f"{self.file_wait}분 동안 마운트에서 파일이 {state} 않았습니다. rclone 마운트 상태를 확인하세요.")
                 else:
                     r["waiting"] = True
+                    # 오래 기다릴수록 덜 자주 다시 확인(=VFS 새로고침): 20초 → 최대 2분
+                    r["wait_retry"] = int(min(120, max(FILE_WAIT_INTERVAL, waited / 3)))
                     r["messages"].append(f"마운트에 아직 {state} 않음 · {int(waited)}초 대기 중 (최대 {self.file_wait}분)")
 
         # 3) 스캔할 디렉터리 (VFS 실패·파일 대기 이벤트는 보류) → 상위 폴더로 합치기
@@ -2574,8 +2647,14 @@ class BookOasis:
                 entry["events"].add(ev["id"])
                 entry["removed"] |= is_removed
         kept = []
+
+        def is_library_root(path):
+            lib = self.library_for(path)
+            return bool(lib) and not path[len(lib["root"]):].strip("/")
         for d in sorted(wanted, key=lambda v: (v.count("/"), v)):
-            parent = next((k for k in kept if under(d, k) and self.library_for(k) == self.library_for(d)), None)
+            # 보관함 맨 위로 합치면 전체 스캔이 되므로, 맨 위 폴더는 다른 폴더를 흡수하지 않는다
+            parent = next((k for k in kept if under(d, k) and self.library_for(k) == self.library_for(d)
+                           and (self.allow_root_scan or not is_library_root(k))), None)
             if parent:
                 wanted[parent]["events"] |= wanted[d]["events"]
                 wanted[parent]["removed"] |= wanted[d]["removed"]
@@ -2603,9 +2682,13 @@ class BookOasis:
             label = f"{lib['db_type']}#{lib['id']} {lib['name']}" if lib else ""
             if ok is not None:
                 log.info("스캔 %s %s [%s] %s", "OK" if ok else "실패", d, label, message)
+            elif lib:
+                log.info("스캔 건너뜀 %s [%s] %s", d, label, message)
             for event_id in wanted[d]["events"]:
                 results[event_id]["scans"].append({"dir": d, "library": label, "ok": ok, "msg": message,
                                                    "merged": d not in own.get(event_id, ())})
+                if ok is None and lib:
+                    results[event_id]["messages"].append(message)  # 보관함 안이지만 일부러 건너뜀 (맨 위 폴더 등)
                 if ok is False:
                     results[event_id]["ok"] = False
                     if "토큰 불일치" in message:
@@ -2630,7 +2713,7 @@ class BookOasis:
                 r["messages"].append("워커 중지로 처리 미완료")
             message = "; ".join(r["messages"]) or ("보관함 밖 경로" if status == "skipped" else "")
             final[ev["id"]] = {"status": status, "message": message, "vfs": r["vfs"], "scans": r["scans"],
-                               "terminal": bool(r.get("terminal")), "retry_in": r.get("deferred")}
+                               "terminal": bool(r.get("terminal")), "retry_in": r.get("deferred") or r.get("wait_retry")}
         return final
 
 
@@ -2793,6 +2876,24 @@ class Worker:
 
     def heartbeat(self):
         self.state["ts"] = time.time()
+        try:  # 부하 점검: 최근 1시간 호출 수, 워커 CPU(최근 구간 평균), 메모리
+            times = os.times()
+            cpu = times.user + times.system
+            last = getattr(self, "_cpu_mark", None)
+            if last and self.state["ts"] > last[1]:
+                self._cpu_pct = round((cpu - last[0]) / (self.state["ts"] - last[1]) * 100, 1)
+            if not last or self.state["ts"] - last[1] >= 30:
+                self._cpu_mark = (cpu, self.state["ts"])
+            try:
+                with open("/proc/self/statm") as handle:
+                    rss = int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // (1024 * 1024)
+            except (OSError, ValueError, IndexError):
+                import resource
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+            self.state["load"] = dict(load_summary(), cpu=getattr(self, "_cpu_pct", 0.0), mem_mb=rss,
+                                      cpu_total=round(cpu, 1))
+        except Exception:
+            pass
         path = os.path.join(self.data_dir, "heartbeat.json")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as handle:

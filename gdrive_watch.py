@@ -260,6 +260,7 @@ DEFAULT_WATCH = {
     "poll_skeleton_depth": 2,
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
+    "allow_root_scan": False,
     "notify_done": True,
     "notify_interval_minutes": 10,
     "notify_batch_count": 100,
@@ -483,7 +484,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
         return {"success": True, "worker": {"alive": alive, "pid": beat.get("pid"), "started": beat.get("started"),
                                              "activity": beat.get("activity") if alive else "중지됨",
                                              "last_poll": beat.get("last_poll"), "next_poll": beat.get("next_poll"),
-                                             "last_process": beat.get("last_process"),
+                                             "last_process": beat.get("last_process"), "load": beat.get("load") if alive else None,
                                              "error": beat.get("error"), "stopped_by_user": os.path.exists(_path("disabled.flag"))},
                 "counts": counts, "today": today_counts, "roots": roots, "warnings": warnings,
                 "libraries": len(runtime.get("libraries") or []), "auto_start": runtime.get("auto_start"),
@@ -758,12 +759,11 @@ class GDriveWatchProvider(BaseMetadataProvider):
         db = _db()
         prefix = base + "/"
         # 바로 아래 폴더 목록 (추적 목록 기준)
-        children = db.execute(
-            "SELECT file_id, path, sig FROM item WHERE root=? AND is_dir=1 AND path >= ? AND path < ? "
-            "AND instr(substr(path, ?), '/')=0 ORDER BY path", (root, prefix, prefix[:-1] + "0", len(prefix) + 1)).fetchall()
-        files_here = db.execute(
-            "SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND path >= ? AND path < ? AND instr(substr(path, ?), '/')=0",
-            (root, prefix, prefix[:-1] + "0", len(prefix) + 1)).fetchone()[0]
+        where, args = worker.children_sql(db)
+        children = db.execute(f"SELECT file_id, path, sig FROM item WHERE root=? AND is_dir=1 AND {where} ORDER BY path",
+                              (root,) + args(prefix)).fetchall()
+        files_here = db.execute(f"SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND {where}",
+                                (root,) + args(prefix)).fetchone()[0]
         polled = bool(db.execute("SELECT 1 FROM pollfolder WHERE root=? LIMIT 1", (root,)).fetchone())
         rows = []
         for child in children[:300]:
@@ -771,8 +771,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
             lo, hi = path + "/", path + "0"
             count = db.execute("SELECT COUNT(*) FROM item WHERE root=? AND is_dir=0 AND path >= ? AND path < ?",
                                (root, lo, hi)).fetchone()[0]
-            subdirs = db.execute("SELECT COUNT(*) FROM item WHERE root=? AND is_dir=1 AND path >= ? AND path < ? "
-                                 "AND instr(substr(path, ?), '/')=0", (root, lo, hi, len(lo) + 1)).fetchone()[0]
+            subdirs = db.execute(f"SELECT COUNT(*) FROM item WHERE root=? AND is_dir=1 AND {where}",
+                                 (root,) + args(lo)).fetchone()[0]
             last_event = db.execute("SELECT MAX(created) FROM event WHERE root=? AND (path=? OR (path >= ? AND path < ?))",
                                     (root, path, lo, hi)).fetchone()[0]
             row = {"path": path, "name": os.path.basename(path), "files": count, "subdirs": subdirs,
@@ -1076,6 +1076,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "poll_skeleton_depth": _load_worker_module().poll_policy(watch)["skeleton_depth"],
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
+            "allow_root_scan": bool(watch.get("allow_root_scan", False)),
             "notify_done": bool(watch.get("notify_done", True)),
             "notify_interval_minutes": min(1440, max(0, int(watch.get("notify_interval_minutes", 10) if watch.get("notify_interval_minutes") not in (None, "") else 10))),
             "notify_batch_count": min(10000, max(0, int(watch.get("notify_batch_count", 100) if watch.get("notify_batch_count") not in (None, "") else 100))),
