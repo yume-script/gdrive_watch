@@ -232,10 +232,12 @@ def _db():
     if key is None or _SCHEMA_READY["key"] != key:  # 스키마 준비는 DB 파일/워커 버전마다 한 번
         try:
             db.executescript(_load_worker_module().SCHEMA)
-            try:
-                db.execute("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
+            for ddl in ("ALTER TABLE event ADD COLUMN force INTEGER DEFAULT 0",
+                        "ALTER TABLE event ADD COLUMN screened INTEGER DEFAULT 0"):
+                try:
+                    db.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
         except Exception:
             db.close()
             raise
@@ -261,6 +263,7 @@ DEFAULT_WATCH = {
     "ignore_patterns": None,  # None이면 워커 기본값
     "discord_webhook": "",
     "allow_root_scan": False,
+    "db_dedupe": True,
     "notify_done": True,
     "notify_interval_minutes": 10,
     "notify_batch_count": 100,
@@ -412,6 +415,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             return {"success": False, "error": f"{type(error).__name__}: {error}"}
 
     def _rpc_status(self, ctx):
+        _start_screener(self, from_request=True)  # 서버 시작 때 못 띄웠으면 여기서 (요청 문맥이 있는 인스턴스로)
         runtime = self._sync_runtime()
         alive = _worker_alive()
         if not alive and runtime.get("auto_start") and runtime.get("roots") and not os.path.exists(_path("disabled.flag")):
@@ -488,7 +492,8 @@ class GDriveWatchProvider(BaseMetadataProvider):
                                              "error": beat.get("error"), "stopped_by_user": os.path.exists(_path("disabled.flag"))},
                 "counts": counts, "today": today_counts, "roots": roots, "warnings": warnings,
                 "libraries": len(runtime.get("libraries") or []), "auto_start": runtime.get("auto_start"),
-                "version": _plugin_version(), "db_missing": db_missing}
+                "version": _plugin_version(), "db_missing": db_missing,
+                "dedupe": _read_json("screener.json", {}) or {}}
 
     _HEAVY = {"ts": 0, "data": None, "migrated": False}
 
@@ -1077,6 +1082,7 @@ class GDriveWatchProvider(BaseMetadataProvider):
             "ignore_patterns": patterns,
             "discord_webhook": webhook,
             "allow_root_scan": bool(watch.get("allow_root_scan", False)),
+            "db_dedupe": bool(watch.get("db_dedupe", True)),
             "notify_done": bool(watch.get("notify_done", True)),
             "notify_interval_minutes": min(1440, max(0, int(watch.get("notify_interval_minutes", 10) if watch.get("notify_interval_minutes") not in (None, "") else 10))),
             "notify_batch_count": min(10000, max(0, int(watch.get("notify_batch_count", 100) if watch.get("notify_batch_count") not in (None, "") else 100))),
@@ -1782,3 +1788,141 @@ class GDriveWatchProvider(BaseMetadataProvider):
     # 대시보드/홈 위젯은 제공하지 않음
     def get_dashboard_data(self, db_type, limit=10):
         return {"success": True, "items": []}
+
+
+# ─────────────────────────── BookOasis DB 중복 확인 ───────────────────────────
+# 새 파일(추가) 기록을 워커가 처리하기 전에, 같은 경로의 도서가 이미 BookOasis DB에 있으면
+# VFS 새로고침·스캔 없이 '이미 등록됨'으로 끝낸다. (DB는 BookOasis 프로세스 안의 플러그인만 볼 수 있어 여기서 돈다)
+_SCREENER = {"thread": None, "lock": None, "provider": None, "app": None}
+
+
+def _screen_once(provider, runtime, state):
+    import sqlite3 as _sqlite
+    libraries = sorted(runtime.get("libraries") or [], key=lambda lib: -max((len(r) for r in lib.get("roots") or [""]), default=0))
+
+    def library_for(path):
+        for lib in libraries:
+            for root in lib.get("roots") or []:
+                root = root.rstrip("/")
+                if root and (path == root or path.startswith(root + "/")):
+                    return lib
+        return None
+
+    db = _sqlite.connect(_path("state.db"), timeout=30)
+    db.row_factory = _sqlite.Row
+    try:
+        rows = db.execute("SELECT id, root, action, item_type, path, force, created FROM event "
+                          "WHERE status='pending' AND COALESCE(screened, 0)=0 ORDER BY id LIMIT 500").fetchall()
+        if not rows:
+            return 0
+        gateways, dups, now = {}, 0, time.strftime("%Y-%m-%dT%H:%M:%S")
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600))
+        for row in rows:
+            dup = None
+            if (row["action"] == "create" and row["item_type"] == "file" and not row["force"]
+                    and row["root"] != "수동 요청" and _is_book_file(row["path"])):
+                lib = library_for(row["path"])
+                # 같은 경로가 최근 1시간 안에 지워졌다면(다시 올림) 내용이 바뀌었을 수 있으니 중복으로 보지 않는다
+                reupload = db.execute("SELECT 1 FROM event WHERE action IN ('delete','rename','move') "
+                                      "AND removed_path=? AND created>=? LIMIT 1", (row["path"], since)).fetchone()
+                if lib and not reupload:
+                    db_type = lib.get("db_type") or "general"
+                    if db_type not in gateways:
+                        gateways[db_type] = provider.get_db_gateway(db_type)
+                    raw = gateways[db_type]
+                    sql = "SELECT id, COALESCE(is_deleted, 0) AS gone FROM books WHERE file_path = %s LIMIT 1"
+                    try:
+                        found = raw.fetch_one(sql, (row["path"],))
+                    except Exception:
+                        found = raw.fetch_one(sql.replace("%s", "?"), (row["path"],))
+                    if found and not int(found.get("gone") or 0):
+                        dup = found["id"]
+            with db:
+                if dup:
+                    dups += 1
+                    message = f"이미 BookOasis에 등록된 파일 (도서 #{dup}) · VFS 새로고침·스캔 생략"
+                    result = {"vfs": [], "scans": [], "db_ok": True, "db_msg": f"도서 #{dup}", "dup": dup, "db_at": time.time()}
+                    db.execute("UPDATE event SET status='skipped', screened=1, message=?, result=?, finished=? WHERE id=?",
+                               (message, json.dumps(result, ensure_ascii=False), now, row["id"]))
+                else:
+                    db.execute("UPDATE event SET screened=1 WHERE id=?", (row["id"],))
+        if dups:
+            state["dups"] = [t for t in state.get("dups", []) if t >= time.time() - 3600] + [time.time()] * dups
+        return len(rows)
+    finally:
+        db.close()
+
+
+def _screen_loop(provider):
+    import contextlib
+    state = {"dups": []}
+    while True:
+        runtime = _read_json("runtime.json", {}) or {}
+        info = {"ts": time.time(), "enabled": bool(runtime.get("db_dedupe", True)), "ok": True, "pid": os.getpid()}
+        try:
+            if info["enabled"] and os.path.exists(_path("state.db")):
+                # DB 게이트웨이가 Flask 앱 문맥을 요구할 수 있어, 화면에서 받아 둔 앱이 있으면 그 문맥 안에서 실행
+                app = _SCREENER.get("app")
+                with (app.app_context() if app is not None else contextlib.nullcontext()):
+                    _screen_once(_SCREENER.get("provider") or provider, runtime, state)
+        except Exception as error:
+            # DB를 볼 수 없으면 워커가 기다리지 않도록 '사용 불가'로 알리고 1분 뒤 다시
+            info.update(ok=False, error=f"{type(error).__name__}: {error}"[:300])
+            try:
+                db = sqlite3.connect(_path("state.db"), timeout=30)
+                with db:
+                    db.execute("UPDATE event SET screened=1 WHERE status='pending' AND COALESCE(screened, 0)=0")
+                db.close()
+            except Exception:
+                pass
+        info["dups_1h"] = sum(1 for t in state.get("dups", []) if t >= time.time() - 3600)
+        try:
+            _write_json("screener.json", info)
+        except OSError:
+            pass
+        if not info["ok"] and _SCREENER.get("app") is None:
+            # 앱 문맥 없이 시작돼 DB를 못 보는 경우: 잠금을 풀고 끝낸다 → 화면을 여는 요청(앱 문맥 있음)에서 다시 시작
+            try:
+                _SCREENER["lock"].close()
+            except Exception:
+                pass
+            _SCREENER["lock"] = None
+            return
+        time.sleep(5 if info["ok"] else 60)
+
+
+def _start_screener(provider, from_request=False):
+    """BookOasis 프로세스(여러 개일 수 있음) 중 하나에서만 중복 확인 스레드를 돌린다 (파일 잠금)."""
+    if from_request:  # 요청 문맥이 있는 인스턴스·앱을 받아 두면 스레드가 그걸로 DB를 본다
+        _SCREENER["provider"] = provider
+        try:
+            from flask import current_app
+            _SCREENER["app"] = current_app._get_current_object()
+        except Exception:
+            pass
+    thread = _SCREENER.get("thread")
+    if thread and thread.is_alive():
+        return True
+    try:
+        import fcntl
+        import threading
+        os.makedirs(DATA_DIR, exist_ok=True)
+        handle = open(_path("screener.lock"), "a+")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return False  # 다른 BookOasis 프로세스가 이미 돌리는 중
+        _SCREENER["lock"] = handle
+        thread = threading.Thread(target=_screen_loop, args=(provider,), daemon=True, name="gdrive_watch-dedupe")
+        _SCREENER["thread"] = thread
+        thread.start()
+        return True
+    except Exception:
+        return False
+
+
+try:
+    _start_screener(GDriveWatchProvider())
+except Exception:
+    pass

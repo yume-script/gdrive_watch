@@ -10,7 +10,7 @@
     window.__gdwTimers = [];
 
     var ACTION = { create: '추가', edit: '수정', rename: '이동', move: '이동', delete: '삭제', restore: '복원' };
-    var STATUS = { pending: '대기', waiting: '잠시 대기', done: '반영됨', skipped: '보관함 밖', failed: '실패', timeout: '시간 초과' };
+    var STATUS = { pending: '대기', waiting: '잠시 대기', done: '반영됨', skipped: '건너뜀', failed: '실패', timeout: '시간 초과' };
     var st = { status: '', q: '', page: 1, size: 50, total: 0, open: {}, picked: {}, tab: 'events', watch: null, alive: false,
         expanded: {}, breakdown: {} };
 
@@ -84,6 +84,11 @@
             if (ld) loadBox.textContent = '최근 1시간 · Drive 호출 ' + (ld.drive || 0).toLocaleString() + ' · VFS 새로고침 ' + (ld.vfs || 0).toLocaleString()
                 + ' · 스캔 요청 ' + (ld.scan || 0).toLocaleString() + (ld.rootscan ? ' (전체 스캔 대신 미룸 ' + ld.rootscan + ')' : '')
                 + ' · 워커 CPU ' + (ld.cpu || 0) + '% · 메모리 ' + (ld.mem_mb || 0) + 'MB';
+            var dd = d.dedupe || {};
+            if (ld && dd.enabled) {
+                var fresh = dd.ts && (Date.now() / 1000 - dd.ts) < 60;
+                loadBox.textContent += ' · DB 중복 확인 ' + (!fresh ? '멈춤' : dd.ok ? '건너뜀 ' + (dd.dups_1h || 0) : '사용 불가 (' + (dd.error || '') + ')');
+            }
         }
         bind('toggle').textContent = w.alive ? '중지' : '시작';
         var ver = bind('version');
@@ -646,7 +651,7 @@
             else if (a === 'retry_selected') { if (!pickedIds().length) return toast('재시도할 기록을 선택하세요.', true); act('retry', { ids: pickedIds() }); st.picked = {}; }
             else if (a === 'retry_failed') act('retry', { all_failed: true });
             else if (a === 'delete_selected') { if (!pickedIds().length) return toast('삭제할 기록을 선택하세요.', true); if (confirm(pickedIds().length + '건을 삭제할까요?')) { act('delete', { ids: pickedIds() }); st.picked = {}; } }
-            else if (a === 'clear_done') { if (confirm('반영됨·보관함 밖 기록을 모두 지울까요? (시간 초과·실패 기록은 남깁니다)')) act('delete', { clear: 'done' }); }
+            else if (a === 'clear_done') { if (confirm('반영됨·건너뜀 기록을 모두 지울까요? (시간 초과·실패 기록은 남깁니다)')) act('delete', { clear: 'done' }); }
             else if (a === 'prev') { st.page = Math.max(1, st.page - 1); loadEvents(); }
             else if (a === 'next') { st.page += 1; loadEvents(); }
             else if (a === 'add_root') { st.watch.roots.push({ name: '', mode: 'changes', source_remote: '', root_id: '', local_root: '', seed: true, enabled: true }); renderRoots(); }

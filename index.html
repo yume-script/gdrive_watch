@@ -27,7 +27,7 @@
     <div class="gdw-tally">
       <button type="button" class="gdw-flow-seg" data-filter="pending"><span>대기</span><strong data-count="pending">0</strong></button>
       <button type="button" class="gdw-flow-seg is-done" data-filter="done"><span>반영됨</span><strong data-count="done">0</strong></button>
-      <button type="button" class="gdw-flow-seg is-skip" data-filter="skipped"><span>보관함 밖</span><strong data-count="skipped">0</strong></button>
+      <button type="button" class="gdw-flow-seg is-skip" data-filter="skipped"><span title="보관함 밖 경로, 이미 등록된 파일(중복), 다음 전체 스캔 때 반영">건너뜀</span><strong data-count="skipped">0</strong></button>
       <button type="button" class="gdw-flow-seg is-fail" data-filter="failed"><span>실패</span><strong data-count="failed">0</strong></button>
     </div>
     <p class="gdw-meta" data-bind="meta"></p>
@@ -85,7 +85,7 @@
         <option value="pending">대기 (잠시 대기 포함)</option>
         <option value="waiting">잠시 대기 (파일 확인·전체 스캔 회피)</option>
         <option value="done">반영됨</option>
-        <option value="skipped">보관함 밖</option>
+        <option value="skipped">건너뜀 (보관함 밖·중복)</option>
         <option value="failed">실패 (시간 초과 포함)</option>
         <option value="timeout">시간 초과</option>
         <option value="db_missing">반영됨 · DB에 없음</option>
@@ -193,6 +193,7 @@
         <label title="감시 폴더에서 이 단계까지의 폴더는 새 작품 폴더가 생기는 분류 폴더로 봅니다 (1일 안에 바뀌었으면 매 주기 확인). 0이면 감시 폴더 자체만">분류 폴더 단계(0~5)<input type="number" min="0" max="5" data-opt="poll_skeleton_depth"></label>
         <label title="Drive 폴더 비교 방식에서 폴더 묶음(50개)을 동시에 몇 개씩 조회할지. 늘리면 빨라지지만 Drive API 호출이 몰립니다 (1~16)">폴더 비교 동시 조회<input type="number" min="1" max="16" data-opt="drive_workers"></label>
         <label title="보관함 전체 스캔(cron)이 시작된 뒤 이 시간 동안은 그 보관함의 부분 스캔을 미룹니다. 2시간보다 자주 도는 일정은 회피하지 않습니다. 0이면 끔">전체 스캔 회피(분)<input type="number" min="0" data-opt="full_scan_guard_minutes"></label>
+        <label class="gdw-check" title="새 파일이 감지되면 먼저 BookOasis DB에서 같은 경로의 도서를 찾아, 이미 등록돼 있으면 rclone VFS 새로고침과 스캔을 하지 않고 '이미 등록됨'으로 끝냅니다. (최근 1시간 안에 같은 경로가 지워졌던 다시 올림은 제외)"><input type="checkbox" data-opt="db_dedupe"> 이미 등록된 파일은 건너뛰기 (BookOasis DB 확인)</label>
         <label class="gdw-check" title="보관함 맨 위 폴더에서 바뀐 것(맨 위 작품 폴더 삭제 등)은 부분 스캔으로 처리하면 보관함 전체 스캔이 됩니다. 끄면 다음 예약 전체 스캔 때 반영합니다."><input type="checkbox" data-opt="allow_root_scan"> 보관함 맨 위 변경 때 전체 스캔 허용</label>
         <label class="gdw-check"><input type="checkbox" data-opt="verbose_log"> 자세한 로그 (변경 하나하나를 어떻게 처리했는지 로그에 남김)</label>
         <label class="gdw-wide">감지할 확장자 <small>(비우면 책·오디오·영상·자막 기본값, all이면 전부)</small><input type="text" data-opt="extensions" placeholder=".zip .cbz .epub .pdf"></label>

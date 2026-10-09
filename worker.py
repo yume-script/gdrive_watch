@@ -366,8 +366,22 @@ def open_db(path):
         db.execute("ALTER TABLE pollfolder ADD COLUMN folder_mtime REAL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    try:  # v1.18.7: 플러그인이 BookOasis DB로 중복(이미 등록된 파일)을 먼저 걸러 냈는지
+        db.execute("ALTER TABLE event ADD COLUMN screened INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     ensure_parent_index(db)
     return db
+
+
+def screener_active(data_dir):
+    """플러그인의 DB 중복 확인이 돌고 있는지 (최근 30초 안에 기록, 사용 중, 오류 없음)."""
+    try:
+        with open(os.path.join(data_dir, "screener.json"), encoding="utf-8") as handle:
+            info = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return bool(info.get("enabled") and info.get("ok") and time.time() - float(info.get("ts") or 0) < 30)
 
 
 def ensure_parent_index(db):
@@ -518,9 +532,13 @@ class Store:
                             (root, rc, fs, remote, datetime.now().isoformat(timespec="seconds")))
 
     def claim(self, limit=500):
+        # 플러그인의 DB 중복 확인이 돌고 있으면, 확인을 마친 기록만 가져간다 (중복이면 VFS·스캔 없이 끝남)
+        screened = screener_active(os.path.dirname(self.path))
         rows = self.db.execute(
-            "SELECT * FROM event WHERE status IN ('pending','waiting') AND ready_at<=? ORDER BY ready_at, id LIMIT ?",
-            (time.time(), limit)).fetchall()
+            "SELECT * FROM event WHERE status IN ('pending','waiting') AND ready_at<=? "
+            + ("AND (screened=1 OR status='waiting' OR ready_at < ?) " if screened else "AND ? IS NOT NULL ")
+            + "ORDER BY ready_at, id LIMIT ?",
+            (time.time(), time.time() - 300, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def finish(self, event, status, message, result, max_attempts, retry_in=None):
@@ -924,9 +942,29 @@ def build_event(prev, cur):
         return {"action": "create", "item_type": item_type, "path": new, "removed_path": ""}
     if old != new:
         return {"action": "rename", "item_type": item_type, "path": new, "removed_path": old}
-    if not new or item_type == "directory" or (cur.get("sig") and prev.get("sig") == cur["sig"]):
+    if not new or item_type == "directory" or not content_changed(prev.get("sig"), cur.get("sig")):
         return None
     return {"action": "edit", "item_type": item_type, "path": new, "removed_path": ""}
+
+
+def content_changed(old_sig, new_sig):
+    """같은 경로 파일의 '내용'이 바뀌었는지. 수정 시각만 바뀌고 크기·md5가 같으면(메타데이터만 변경) 아니다.
+    이전 서명을 모르면(빈 값) 바뀐 증거가 없으므로 아니다 → 쓸데없는 VFS 새로고침·스캔을 하지 않는다."""
+    if not new_sig or not old_sig:
+        return False
+    if old_sig == new_sig:
+        return False
+    try:
+        old, new = json.loads(old_sig), json.loads(new_sig)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return True
+    if old.get("md5Checksum") and new.get("md5Checksum"):
+        return old["md5Checksum"] != new["md5Checksum"] or old.get("size") != new.get("size")
+    if old.get("size") is not None and new.get("size") is not None and old.get("size") != new.get("size"):
+        return True
+    return old.get("modifiedTime") != new.get("modifiedTime")
 
 
 class Watcher:
@@ -2565,6 +2603,9 @@ class BookOasis:
             if self._vfs_already_done(ev):
                 results[ev["id"]]["vfs"] = self._previous_vfs(ev)
                 continue
+            if not any(p and self.library_for(p) for p in (ev["path"], ev["removed_path"])):
+                results[ev["id"]]["outside"] = True  # 어느 보관함에도 속하지 않는 경로: VFS 새로고침도 하지 않음
+                continue
             is_dir = ev["item_type"] == "directory"
             path, removed = ev["path"], ev["removed_path"]
             ops = []
@@ -2634,7 +2675,7 @@ class BookOasis:
         wanted, own = {}, {}
         for ev in events:
             r = results[ev["id"]]
-            if not r["ok"] or r.get("waiting") or r.get("timeout"):
+            if not r["ok"] or r.get("waiting") or r.get("timeout") or r.get("outside"):
                 continue
             dirs = []
             if ev["action"] != "delete" and ev["path"]:
@@ -2698,7 +2739,10 @@ class BookOasis:
         final = {}
         for ev in events:
             r = results[ev["id"]]
-            if r.get("timeout"):
+            if r.get("outside"):
+                status = "skipped"
+                r["messages"].append("보관함 밖 경로 (VFS 새로고침·스캔 안 함)")
+            elif r.get("timeout"):
                 status = "timeout"
             elif r.get("waiting") or (r.get("deferred") and r["ok"] and not r["scans"]):
                 status = "waiting"
